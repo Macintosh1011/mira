@@ -1,29 +1,19 @@
 import type { Metadata } from "next";
-import { Newsreader, Inter, JetBrains_Mono } from "next/font/google";
+import { Fraunces } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 
-const serif = Newsreader({
-  variable: "--font-serif",
+const fraunces = Fraunces({
+  variable: "--font-display",
   subsets: ["latin"],
-  weight: ["300", "400", "500", "600"],
-  style: ["normal", "italic"],
-});
-
-const sans = Inter({
-  variable: "--font-sans",
-  subsets: ["latin"],
-});
-
-const mono = JetBrains_Mono({
-  variable: "--font-mono",
-  subsets: ["latin"],
-  weight: ["400", "500"],
+  axes: ["opsz"],
 });
 
 export const metadata: Metadata = {
   title: "Mira — the visualization layer for thinking",
   description:
-    "Speak an idea. Mira generates a narrated, animated explanation that renders live in your browser.",
+    "Speak or type a question. Mira generates a narrated, animated explanation that renders live in your browser.",
 };
 
 export default function RootLayout({
@@ -34,9 +24,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${serif.variable} ${sans.variable} ${mono.variable} h-full antialiased`}
+      className={`${GeistSans.variable} ${GeistMono.variable} ${fraunces.variable}`}
     >
-      <body className="min-h-full">{children}</body>
+      <body>{children}</body>
     </html>
   );
 }

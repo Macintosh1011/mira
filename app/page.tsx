@@ -1,179 +1,256 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { Pause, Play, MessageSquarePlus } from "lucide-react";
 import { useMiraSession } from "@/lib/useMiraSession";
-import CommandPalette from "@/components/CommandPalette";
-import HomeHero from "@/components/HomeHero";
-import SceneStage from "@/components/SceneStage";
-import GenerationPanel from "@/components/GenerationPanel";
-import { IconSparkle, IconWarn } from "@/components/icons";
+import CommandPalette, {
+  type PalettePhase,
+} from "@/components/CommandPalette";
+import NNCanvas from "@/components/canvas/NNCanvas";
+import FedCanvas from "@/components/canvas/FedCanvas";
+import { PhaseIndicator } from "@/components/canvas/CanvasShared";
+import RenderHost from "@/lib/render/RenderHost";
+import { RECENTS } from "@/lib/topics";
+
+const TOPIC_CANVAS = {
+  NNCanvas,
+  FedCanvas,
+} as const;
 
 export default function Page() {
-  const { state, generate, reset } = useMiraSession();
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const session = useMiraSession();
+  const {
+    phase,
+    input,
+    agents,
+    micActive,
+    canvasPhase,
+    captionIdx,
+    scene,
+    paletteVisible,
+    dismissing,
+    openPalette,
+    closePalette,
+    setInput,
+    toggleMic,
+    submit,
+    togglePause,
+    openFollowUp,
+  } = session;
 
-  const hasScene = state.phase === "ready" && !!state.code;
-  const isGenerating =
-    state.phase !== "idle" &&
-    state.phase !== "ready" &&
-    state.phase !== "error";
+  const [controlsVisible, setControlsVisible] = useState(false);
 
-  // global Cmd+K / Ctrl+K
+  const isLive = phase === "playing" || phase === "paused" || phase === "morphing";
+  // Keep the prior scene mounted while a follow-up generates over it.
+  const showCanvas = scene !== null && phase !== "empty" && phase !== "active";
+  const currentCaption =
+    scene && captionIdx >= 0 ? scene.cues[captionIdx]?.text ?? null : null;
+  const captionVisible = isLive && currentCaption !== null;
+
+  // ── Global keyboard ─────────────────────────────────────────────────
+  // Latest handlers via ref so the listener binds once.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      const cmd = e.metaKey || e.ctrlKey;
+
+      if (cmd && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setPaletteOpen((o) => !o);
+        if (phase === "empty") openPalette();
+        else if (phase === "playing" || phase === "paused") openFollowUp();
+        else closePalette();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (paletteVisible) closePalette();
+        return;
+      }
+      if (e.key === " " && (phase === "playing" || phase === "paused")) {
+        // don't hijack space while typing in the palette
+        if (document.activeElement?.tagName === "INPUT") return;
+        e.preventDefault();
+        togglePause();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [
+    phase,
+    paletteVisible,
+    openPalette,
+    closePalette,
+    openFollowUp,
+    togglePause,
+  ]);
 
-  const submit = useCallback(
-    (query: string) => {
-      setPaletteOpen(false);
-      // a query while a scene is live is a follow-up → mutate
-      generate(query, hasScene);
-    },
-    [generate, hasScene],
-  );
+  // ── Playback controls reveal on cursor move ─────────────────────────
+  // The JSX gates visibility on phase, so we don't reset state on exit.
+  useEffect(() => {
+    if (phase !== "playing" && phase !== "paused") return;
+    let timeout: number;
+    const reveal = () => {
+      setControlsVisible(true);
+      window.clearTimeout(timeout);
+      timeout = window.setTimeout(() => setControlsVisible(false), 2200);
+    };
+    window.addEventListener("mousemove", reveal);
+    // Reveal once on entry, deferred a tick so it isn't a synchronous
+    // setState in the effect body.
+    const initial = window.setTimeout(reveal, 0);
+    return () => {
+      window.removeEventListener("mousemove", reveal);
+      window.clearTimeout(timeout);
+      window.clearTimeout(initial);
+    };
+  }, [phase]);
+
+  const palettePhase: PalettePhase =
+    phase === "empty" || phase === "playing" || phase === "paused"
+      ? "active"
+      : phase;
+
+  const stateBadgeLabel = phase === "paused" ? "paused" : phase;
+  const canvasDimmed = phase === "morphing" || phase === "generating";
+  const TopicCanvas =
+    scene?.kind === "topic" && scene.canvas
+      ? TOPIC_CANVAS[scene.canvas]
+      : null;
 
   return (
-    <div className="relative flex min-h-dvh flex-col">
-      <TopBar
-        onOpenPalette={() => setPaletteOpen(true)}
-        onReset={hasScene || state.phase === "error" ? reset : undefined}
-        query={state.query}
-      />
-
-      <main className="flex flex-1 flex-col">
-        {/* IDLE — hero + gallery */}
-        {state.phase === "idle" && (
-          <HomeHero onOpenPalette={() => setPaletteOpen(true)} onPick={submit} />
-        )}
-
-        {/* ERROR */}
-        {state.phase === "error" && (
-          <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center px-6 text-center">
-            <span className="grid h-12 w-12 place-items-center rounded-full border border-coral/40 bg-coral/10 text-coral">
-              <IconWarn className="h-5 w-5" />
-            </span>
-            <h2 className="mt-4 font-serif text-2xl text-ink">
-              The engine stumbled
-            </h2>
-            <p className="mt-2 text-sm text-ink-dim">{state.error}</p>
-            <button
-              onClick={() => state.query && generate(state.query)}
-              className="mt-6 rounded-full bg-coral px-5 py-2.5 text-sm font-medium text-paper transition-transform hover:scale-105 active:scale-95"
-            >
-              Try again
+    <div className="mira-root">
+      {/* Empty state — unmounted during playback so it can't overlap canvas */}
+      {phase === "empty" && (
+        <div className="empty">
+          <div className="grain" />
+          <div
+            style={{
+              position: "relative",
+              zIndex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+            }}
+          >
+            <h1 className="empty-wordmark">Mira</h1>
+            <p className="empty-tagline">The visualization layer for thinking.</p>
+            <button className="empty-hint" onClick={openPalette}>
+              <span className="kbd">⌘</span>
+              <span className="kbd">K</span>
+              <span style={{ marginLeft: 4 }}>to begin</span>
             </button>
           </div>
-        )}
-
-        {/* GENERATING + READY share the stage layout so the scene appears
-            beneath the streaming panel and persists once ready. */}
-        {(isGenerating || hasScene) && (
-          <SceneLayout
-            showStage={hasScene}
-            generationPanel={
-              isGenerating ? <GenerationPanel state={state} /> : null
-            }
-            stage={
-              hasScene ? (
-                <SceneStage
-                  key={state.renderRev}
-                  title={state.plan?.title ?? state.query ?? "Untitled scene"}
-                  code={state.code}
-                  renderer={state.renderer}
-                  narration={state.narration}
-                  renderRev={state.renderRev}
-                />
-              ) : null
-            }
-          />
-        )}
-      </main>
-
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        onSubmit={submit}
-        hasScene={hasScene}
-      />
-    </div>
-  );
-}
-
-/**
- * Desktop and mobile differ here, not just by breakpoint:
- *  - Desktop: stage fills a tall centered column; generation panel floats
- *    over it as an overlay card so the surface is visible behind streaming.
- *  - Mobile: full-bleed stacked layout, stage on top, panel as a sheet.
- */
-function SceneLayout({
-  stage,
-  generationPanel,
-  showStage,
-}: {
-  stage: React.ReactNode;
-  generationPanel: React.ReactNode;
-  showStage: boolean;
-}) {
-  return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 pb-6 pt-3 sm:px-6 sm:pb-10">
-      {showStage ? (
-        <div className="anim-fade-up flex flex-1 flex-col">{stage}</div>
-      ) : (
-        // generation-only: ambient stage placeholder behind the streaming panel
-        <div className="relative flex min-h-[68vh] flex-1 items-center justify-center">
-          <div className="absolute inset-0 rounded-2xl border border-[var(--hairline)] bg-[var(--paper-raised)]" />
-          <div className="relative z-10 w-full px-4">{generationPanel}</div>
         </div>
       )}
-    </div>
-  );
-}
 
-function TopBar({
-  onOpenPalette,
-  onReset,
-  query,
-}: {
-  onOpenPalette: () => void;
-  onReset?: () => void;
-  query: string | null;
-}) {
-  return (
-    <header className="sticky top-0 z-40 flex items-center justify-between gap-3 border-b border-[var(--hairline)] bg-[var(--paper)]/70 px-4 py-3 backdrop-blur-xl sm:px-6">
-      <button
-        onClick={onReset}
-        disabled={!onReset}
-        className="flex items-center gap-2 disabled:cursor-default"
-      >
-        <span className="grid h-7 w-7 place-items-center rounded-lg bg-gradient-to-br from-coral to-amber text-paper">
-          <IconSparkle className="h-4 w-4" />
-        </span>
-        <span className="font-serif text-lg tracking-tight text-ink">Mira</span>
-      </button>
-
-      {/* current query breadcrumb (desktop) */}
-      {query && (
-        <span className="hidden min-w-0 flex-1 truncate px-4 text-center font-serif text-sm italic text-ink-faint sm:block">
-          “{query}”
-        </span>
+      {/* Canvas — hand-authored SVG topic OR live-generated scene.
+          Dims during a follow-up (morphing) or while a follow-up regenerates. */}
+      {showCanvas && scene && (
+        <>
+          {scene.kind === "topic" && TopicCanvas && (
+            <TopicCanvas phase={canvasPhase} dimmed={canvasDimmed} />
+          )}
+          {scene.kind === "live" && (
+            <div className={`canvas-wrap show ${canvasDimmed ? "dimmed" : ""}`}>
+              <RenderHost
+                key={scene.renderRev}
+                code={scene.code ?? null}
+                remountKey={scene.renderRev}
+                playing={phase !== "paused"}
+              />
+              <PhaseIndicator
+                phase={canvasPhase}
+                total={scene.phaseLabels.length}
+                labels={scene.phaseLabels}
+              />
+            </div>
+          )}
+        </>
       )}
 
-      <button
-        onClick={onOpenPalette}
-        className="flex items-center gap-2 rounded-full border border-[var(--hairline-strong)] px-3 py-1.5 text-sm text-ink-dim transition-colors hover:border-coral/40 hover:text-ink"
+      {/* Captions — lower third, gradient backdrop, key-swap fade */}
+      <div
+        className="caption-zone"
+        style={{
+          opacity: captionVisible ? 1 : 0,
+          transition: "opacity 250ms var(--ease-default)",
+        }}
       >
-        <span className="hidden sm:inline">Ask</span>
-        <kbd className="rounded border border-[var(--hairline-strong)] bg-white/[0.03] px-1.5 py-0.5 font-mono text-[10px] text-ink-dim">
-          ⌘K
-        </kbd>
-      </button>
-    </header>
+        <div
+          className={`caption ${captionVisible ? "show" : ""}`}
+          key={captionIdx}
+        >
+          {currentCaption ?? ""}
+        </div>
+      </div>
+
+      {/* Playback controls */}
+      <div
+        className={`playback ${
+          controlsVisible && (phase === "playing" || phase === "paused")
+            ? "show"
+            : ""
+        }`}
+      >
+        <button
+          className="pb-btn"
+          onClick={togglePause}
+          title={phase === "paused" ? "Play" : "Pause"}
+          aria-label={phase === "paused" ? "Play" : "Pause"}
+        >
+          {phase === "paused" ? (
+            <Play size={16} strokeWidth={1.5} />
+          ) : (
+            <Pause size={16} strokeWidth={1.5} />
+          )}
+        </button>
+        <button
+          className="pb-btn"
+          onClick={openFollowUp}
+          title="Ask follow-up"
+          aria-label="Ask follow-up"
+        >
+          <MessageSquarePlus size={16} strokeWidth={1.5} />
+        </button>
+      </div>
+
+      {/* Backdrop (dim click-to-close; hidden during morphing so canvas shows) */}
+      <div
+        className={`backdrop ${
+          paletteVisible && phase !== "morphing" ? "show" : ""
+        }`}
+        onClick={closePalette}
+      />
+
+      {/* Command palette */}
+      <CommandPalette
+        visible={paletteVisible && !dismissing}
+        dismissing={dismissing}
+        phase={palettePhase}
+        inputValue={input}
+        micActive={micActive}
+        showAgents={phase === "generating" || phase === "morphing"}
+        agentStates={agents}
+        showRecent={phase === "active"}
+        recents={RECENTS}
+        onInputChange={setInput}
+        onSubmit={() => submit(input)}
+        onMicToggle={toggleMic}
+        onPickRecent={(q) => {
+          setInput(q);
+          submit(q);
+        }}
+      />
+
+      {/* State badge */}
+      <div className={`state-badge ${isLive ? "live" : ""}`}>
+        <span className="sb-dot" />
+        <span>{stateBadgeLabel}</span>
+        {scene && (
+          <>
+            <span style={{ opacity: 0.5 }}>·</span>
+            <span style={{ opacity: 0.7 }}>{scene.label}</span>
+          </>
+        )}
+      </div>
+    </div>
   );
 }

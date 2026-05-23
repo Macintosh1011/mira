@@ -1,6 +1,7 @@
 "use client";
 
 import type { RenderLibs } from "@/lib/types";
+import { createKit } from "@/lib/kit";
 
 /**
  * p5 / three / gsap all touch `window` at import time, so they can only load
@@ -25,6 +26,7 @@ export async function loadRenderLibs(): Promise<RenderLibs> {
       p5: p5Mod.default,
       THREE: threeMod,
       gsap: gsapMod.gsap ?? gsapMod.default,
+      kit: createKit(),
     };
     return cache;
   })();

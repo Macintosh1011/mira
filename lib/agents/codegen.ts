@@ -1,124 +1,151 @@
 /**
  * Code-gen agent: ScenePlan -> a single render-module body string.
  *
+ * STRATEGY: the model is a COMPOSITOR, not a painter. It does NOT draw beautiful
+ * animation from scratch (unreliable). Instead it arranges a hand-built library
+ * of high-quality primitives (lib/kit) injected as `libs.kit`. The reference
+ * aesthetic lives in the kit; the model's job is layout, timeline, and which
+ * primitives to call. The system prompt below hands it the full kit API surface
+ * plus two gold-standard example bodies that reach reference quality, and tells
+ * it to generate "in exactly this style".
+ *
  * The output is the BODY of `(container, libs) => () => void` (see RenderModule
  * in lib/types.ts). The render host does `new Function("container","libs",code)`
  * and calls the returned cleanup on unmount. So the string MUST:
- *   - use only `container` and `libs` ({ p5, THREE, gsap }) as inputs,
+ *   - use only `container` and `libs` ({ p5, THREE, gsap, kit }) as inputs,
  *   - mount into `container`,
  *   - return a cleanup function,
  *   - contain NO import/export/markdown fences (libs are injected).
  *
  * We stream raw deltas to the UI (code_chunk events) while accumulating, then
- * sanitize the full string before emitting code_done. This is the single most
- * important integration contract in the system, so the prompt carries the full
- * contract plus one 2D and one 3D worked example, and we defensively strip the
- * common failure modes (fences, stray imports) after the fact.
+ * sanitize the full string before emitting code_done. We defensively strip the
+ * common failure modes (fences, stray imports). The SSE contract is unchanged.
  */
 import { generateStream, ThinkingLevel, type GenOptions } from "@/lib/gemini";
 import type { ScenePlan, Renderer } from "@/lib/types";
 import { planRenderer } from "./orchestrator";
+import { FED_RATE_CUT_BODY, NN_CLASSIFIER_BODY, ORBIT_3D_BODY } from "@/lib/kit/examples";
 
-const AESTHETIC = `AESTHETIC (Ciechanowski / 3Blue1Brown house style, non-negotiable):
-- Near-black paper background: #0e0c0d.
-- Soft, muted palette ONLY: terracotta #d98a6a, muted yellow #e8c468, sage #8fb08a, dusty blue #7aa2c2, off-white #e8e2d8 for text.
-- Thin strokes: 1.5px. Never harsh, never pure white on black.
-- Slow, eased motion. Prefer gsap or smooth lerps; nothing jittery or fast.
-- Flat shading on 3D (MeshBasicMaterial or flat-lit), no glossy/metal materials, no harsh point lights.
-- Looks composed even when paused. Label things with small text where it helps understanding.
-- Generous spacing, centered composition, responsive to container size.`;
-
-const CONTRACT = `OUTPUT CONTRACT (read carefully, this is non-negotiable):
+const CONTRACT = `OUTPUT CONTRACT (non-negotiable):
 You output the BODY of a JavaScript function with this exact signature:
     (container, libs) => () => void
-- \`container\` is an HTMLElement you mount into. Read container.clientWidth / clientHeight for sizing; default to 960x600 if zero.
-- \`libs\` is { p5, THREE, gsap }. Use ONLY these libraries. They are already loaded; do NOT import or require anything.
-- Your code MUST end by returning a cleanup function that fully tears down: remove the canvas/renderer DOM node, cancel any requestAnimationFrame loop, kill gsap tweens, dispose three.js geometry/materials.
-- Output RAW JavaScript only. No markdown fences. No \`import\`/\`export\`/\`require\`. No surrounding function wrapper, no \`function mount(...)\`, just the statements that go INSIDE the body. The host wraps it.
-- The very last statement must be \`return <cleanupFn>;\`.
-- Do not reference window/document globals beyond what you create inside container (you may use requestAnimationFrame, cancelAnimationFrame, setTimeout, Math, performance).`;
+- \`container\` is an HTMLElement you mount into. Read container.clientWidth / clientHeight; default to 1280x720 if zero.
+- \`libs\` is { p5, THREE, gsap, kit }. They are already loaded; do NOT import or require anything.
+- Your code MUST end with \`return <cleanupFn>;\` that fully tears down: remove the canvas/renderer DOM node, cancel any requestAnimationFrame loop, kill gsap tweens, dispose three.js geometry/materials.
+- Output RAW JavaScript only. No markdown fences. No import/export/require. No surrounding function wrapper, no \`function mount(...)\` — just the statements that go INSIDE the body. The host wraps it.
+- Do not touch window/document beyond what you create inside container (you may use requestAnimationFrame, cancelAnimationFrame, setTimeout, Math, performance, window.devicePixelRatio, window resize listeners that you remove in cleanup).`;
 
-const EXAMPLE_2D = `EXAMPLE (2D, p5 instance mode) — the SHAPE your output must take:
-const W = container.clientWidth || 960, H = container.clientHeight || 600;
-const sketch = (p) => {
-  let t = 0;
-  p.setup = () => { p.createCanvas(W, H); p.frameRate(60); };
-  p.draw = () => {
-    p.background(14, 12, 13);
-    t += 0.01;
-    p.noFill();
-    p.stroke(217, 138, 106);
-    p.strokeWeight(1.5);
-    p.push();
-    p.translate(W / 2, H / 2);
-    p.beginShape();
-    for (let a = 0; a < p.TWO_PI; a += 0.05) {
-      const r = 120 + 24 * Math.sin(a * 3 + t);
-      p.vertex(Math.cos(a) * r, Math.sin(a) * r);
-    }
-    p.endShape(p.CLOSE);
-    p.pop();
-  };
-};
-const inst = new libs.p5(sketch, container);
-return () => inst.remove();`;
+const AESTHETIC = `AESTHETIC (the Mira house style — already baked into the kit, keep it):
+- Tinted near-black paper #0c0c0e (kit.palette.bg). PURE BLACK #000 IS BANNED.
+- Text ~95% white #f4f4f5 (kit.palette.fg). PURE WHITE #fff IS BANNED.
+- One accent: yellow #efc540 (kit.palette.accent), reserved for active states / values / highlights — never a flat fill, never decoration. Topic colors for multi-series: terracotta, teal, blue, pink, deepRed (all on kit.palette).
+- Strokes 1.5px, never harsh. Quintic / smoothstep easing (kit.ease.*). Flat shading on 3D.
+- Composed even when paused. Small labels where they aid understanding. Generous spacing, centered composition.`;
 
-const EXAMPLE_3D = `EXAMPLE (3D, three.js, flat shading) — the SHAPE your output must take:
-const W = container.clientWidth || 960, H = container.clientHeight || 600;
-const THREE = libs.THREE;
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0e0c0d);
-const camera = new THREE.PerspectiveCamera(50, W / H, 0.1, 100);
-camera.position.set(0, 0, 6);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setSize(W, H);
-container.appendChild(renderer.domElement);
-const geo = new THREE.IcosahedronGeometry(1.6, 1);
-const mat = new THREE.MeshBasicMaterial({ color: 0x7aa2c2, wireframe: true });
-const mesh = new THREE.Mesh(geo, mat);
-scene.add(mesh);
-let raf = 0;
-const loop = () => { mesh.rotation.y += 0.004; mesh.rotation.x += 0.002; renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
-loop();
-return () => {
-  cancelAnimationFrame(raf);
-  geo.dispose(); mat.dispose();
-  renderer.dispose();
-  renderer.domElement.remove();
-};`;
+// The full API surface. The model picks from THESE; it should only drop to raw
+// p5 for things no primitive covers.
+const KIT_API = `KIT API (libs.kit) — PREFER these primitives; every drawing call takes the live p5 instance \`p\` first:
+
+  palette: { bg, surface, fg, fgMuted, fgSubtle, accent, terracotta, teal, blue, pink, deepRed, hairline, hairlineStrong }  // RGB tuples [r,g,b] 0..255
+  ease:    { linear, quintic, smoothstep, smootherstep, outCubic, outQuint, inOutCubic, overshoot }  // each (t:0..1)=>0..1
+
+  // paint + math helpers
+  fill(p, rgb, alpha=1)                       // alpha 0..1
+  stroke(p, rgb, alpha=1, weight=1.5)
+  hexToRgb("#rrggbb") -> rgb
+  clamp01(x) ; lerp(a,b,t)
+  useFonts(p)                                 // call once in p.setup
+
+  // backgrounds & scaffolding
+  grid(p, { reveal=1, cell=100, wash=accent })          // paints bg + radial accent wash + faint sub-grid. Call FIRST each frame.
+  phaseDots(p, { x, y, total, current, label?, color? }) // bottom-left phase timeline
+
+  // typography
+  label(p, { x, y, text, size=13, upper?, color=fg, mono?, align="center", alpha=1, weight? })
+  valueFlip(p, { x, y, from, to, t, size=28, color=accent, align? })   // t 0..1 crossfades from->to
+  deltaTri(p, { x, y, dir:"up"|"down", size=11, color=accent, reveal=1 })
+
+  // node-graph vocabulary (the Fed topic): a stacked-circle "card"
+  node(p, { x, y, r, label?, sublabel?, value?, color=accent, reveal=1, settle=1, delta?:"up"|"down"|null })
+       // hero ring at 18% alpha (brightens with settle) + inner card + uppercase sublabel + big mono value + label below.
+       // If you crossfade the value, omit \`value\` and overlay valueFlip at center.
+  flowEdge(p, { x1, y1, x2, y2, t, color=accent, reveal=1, active=true })  // faint base line + flowing accent dash; t = seconds clock
+  signal(p, { x1, y1, x2, y2, t, color=accent, reveal=1 })                 // brighter/faster dashed pulse along a path
+  gauge(p, { x, y, from:number, to:number, t, label?, unit?, color?, decimals? })  // labeled numeric readout that flips
+
+  // network vocabulary (the NN topic)
+  neuron(p, { x, y, r=11, active?, settled?, winner?, label?, color=accent, reveal=1 })  // active/winner glow, settled=muted gray
+  neuronLayer(p, { x, ys:number[], active?:bool[], settled?:bool[], labels?:string[], title?, sublabel?, r=11, color?, reveal=1 })
+  connectBundle(p, { from:{x,y}[], to:{x,y}[], inset=12, reveal=1 })       // faint full bundle of base edges between two columns
+  pixelGrid(p, { x, y, cell, data:number[][], reveal=1, color=accent, frame? })  // 0/1 (or 0..1) matrix; cells light up in scan order
+  confidenceBar(p, { x, y, w=80, value:0..1, color=accent, showPct=true })
+
+  // chart vocabulary
+  axes(p, { x, y, w, h, reveal=1, xLabel?, yLabel? })
+  plotLine(p, { x, y, w, h, points:{x,y}[], t, color=accent, head=true })  // points normalized 0..1; t = draw-on progress
+
+  // 3D (flat shaded) — for genuinely spatial scenes only
+  scene3d(THREE, container, { fov=50, distance=6, bg? }) -> { scene, camera, renderer, render(), resize(), dispose() }
+  flatSphere(THREE, r, rgb, wire=false) -> Mesh    // Lambert flatShading, or wireframe
+  flatLine(THREE, pts:number[][], rgb) -> Line`;
+
+const TIMELINE_GUIDE = `TIMELINE: write ALL phases into ONE module on a single self-driven clock (use p.millis() inside the p5 sketch, or performance.now() for 3D). Compute a phase index from elapsed time and a per-phase \`local\` progress 0..1 eased with kit.ease.outCubic. Reveal CUMULATIVELY: once a beat appears it stays; later beats reveal on top. Pass that progress as \`reveal\` / \`settle\` / \`t\` into kit primitives — do NOT invent your own tween system. Use a seconds clock (p.millis()/1000) for flowEdge/signal dash flow. Design the layout in a 1600x900 space and scale-to-fit the container (see examples), so coordinates stay readable.`;
 
 function systemFor(renderer: Renderer): string {
-  const example = renderer === "3d" ? EXAMPLE_3D : EXAMPLE_2D;
-  const lib = renderer === "3d" ? "three.js (libs.THREE)" : "p5.js (libs.p5)";
-  return `You are the code-generation agent for Mira. You write a single self-contained ${lib} animation as the body of a render module.
+  if (renderer === "3d") {
+    return `You are the code-generation agent for Mira. You COMPOSE a self-contained three.js scene as the body of a render module, using the injected kit's flat-shaded 3D helpers.
 
 ${CONTRACT}
 
 ${AESTHETIC}
 
-${example}
+${KIT_API}
 
-Write ALL phases of the plan into ONE module: drive them by an internal timeline (elapsed time or phase index) so the scene progresses through the beats on one canvas/renderer. Do not create one canvas per phase. Produce ONLY the function body.`;
+Use kit.scene3d / kit.flatSphere / kit.flatLine for the scene; drop to raw libs.THREE only for shapes the kit lacks. Drive motion with an rAF loop. Generate in EXACTLY the style of this example:
+
+${ORBIT_3D_BODY}
+
+${TIMELINE_GUIDE}
+
+Produce ONLY the function body.`;
+  }
+  return `You are the code-generation agent for Mira. You are a COMPOSITOR: you do not draw from scratch, you arrange the injected kit's hand-built primitives (libs.kit) into a scene. The reference aesthetic lives in the kit — your job is layout, timeline, and which primitives to call.
+
+${CONTRACT}
+
+${AESTHETIC}
+
+${KIT_API}
+
+${TIMELINE_GUIDE}
+
+Generate in EXACTLY the style of these two gold-standard examples. Reuse the same patterns: kit.grid first, a 1600x900 scale-to-fit transform, cumulative phase reveals, kit primitives for every visual element.
+
+=== EXAMPLE A: node-graph (Fed rate cut) ===
+${FED_RATE_CUT_BODY}
+
+=== EXAMPLE B: network (NN classifier) ===
+${NN_CLASSIFIER_BODY}
+
+Now compose a NEW scene for the requested topic in this style. Prefer kit primitives; only drop to raw p5 (via the \`p\` instance) for something no primitive covers, and even then keep the exact palette/strokes/easing from kit. Produce ONLY the function body.`;
 }
 
 function buildPrompt(plan: ScenePlan): string {
   const phases = plan.phases
-    .map(
-      (ph, i) =>
-        `${i + 1}. [${ph.id}] (${ph.approxDurationMs}ms) ${ph.intent}`,
-    )
+    .map((ph, i) => `${i + 1}. [${ph.id}] (${ph.approxDurationMs}ms) ${ph.intent}`)
     .join("\n");
   return `Title: ${plan.title}
 
 Phases to animate, in order, on a single timeline:
 ${phases}
 
-Total runtime ~${plan.phases.reduce((s, p) => s + p.approxDurationMs, 0)}ms. Output the render-module body now.`;
+Total runtime ~${plan.phases.reduce((s, p) => s + p.approxDurationMs, 0)}ms.
+
+Choose the kit vocabulary that fits the topic (node-graph, network, chart, or a mix). Output the render-module body now.`;
 }
 
 function buildMutatePrompt(plan: ScenePlan, previousCode: string): string {
-  return `You are EVOLVING an existing Mira render module, not rewriting it. Keep the structure, palette, and timeline of the previous code; change only what the new plan requires.
+  return `You are EVOLVING an existing Mira render module, not rewriting it. Keep its structure, the kit primitives it uses, palette, and timeline; change only what the new plan requires. Stay a compositor — keep composing from libs.kit.
 
 Previous render-module body:
 ${previousCode}
@@ -176,8 +203,8 @@ export function looksRunnable(code: string): boolean {
   if (code.length < 40) return false;
   if (!/\breturn\b/.test(code)) return false;
   if (!/\b(container|libs)\b/.test(code)) return false;
-  // Must reference at least one injected lib.
-  if (!/libs\.(p5|THREE|gsap)/.test(code)) return false;
+  // Must reference at least one injected lib (kit counts — it's the happy path).
+  if (!/libs\.(p5|THREE|gsap|kit)/.test(code)) return false;
   return true;
 }
 
@@ -209,7 +236,7 @@ export async function generateCode(
   const opts: GenOptions = {
     systemInstruction: systemFor(renderer),
     thinkingLevel: ThinkingLevel.LOW,
-    temperature: 0.6,
+    temperature: 0.55,
     maxOutputTokens: 8192,
     abortSignal,
   };

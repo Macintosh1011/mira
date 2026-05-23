@@ -1,0 +1,68 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e62]:
+      - img [ref=e63]:
+        - generic [ref=e80]:
+          - generic [ref=e83]: Federal Funds Rate
+          - generic [ref=e84]: 4.75%
+          - generic [ref=e85]: Federal Reserve
+        - generic [ref=e86]:
+          - generic [ref=e89]: yield
+          - generic [ref=e90]: 4.20%
+          - generic [ref=e91]: 10-Yr Treasury
+        - generic [ref=e92]:
+          - generic [ref=e95]: over 10Y
+          - generic [ref=e96]: +165bp
+          - generic [ref=e97]: MBS Spread
+        - generic [ref=e98]:
+          - generic [ref=e101]: avg rate
+          - generic [ref=e102]: 7.20%
+          - generic [ref=e103]: 30-Yr Mortgage
+        - generic [ref=e104]:
+          - generic [ref=e107]: index
+          - generic [ref=e108]: "112"
+          - generic [ref=e109]: Refinance Apps
+        - generic [ref=e110]:
+          - generic [ref=e113]: index
+          - generic [ref=e114]: "143"
+          - generic [ref=e115]: Purchase Apps
+        - generic [ref=e116]:
+          - generic [ref=e119]: m/m
+          - generic [ref=e120]: +0.1%
+          - generic [ref=e121]: Home Prices
+      - generic [ref=e128]: policy rate
+    - generic:
+      - generic: When the Federal Reserve cuts its policy rate, the move radiates outward through every credit market.
+    - generic [ref=e129]:
+      - button "Pause" [ref=e130] [cursor=pointer]:
+        - img [ref=e131]
+      - button "Ask follow-up" [ref=e134] [cursor=pointer]:
+        - img [ref=e135]
+    - generic:
+      - generic:
+        - generic:
+          - button "Toggle voice input":
+            - img
+          - textbox "Question" [active]:
+            - /placeholder: Speak or type a question…
+            - text: Animate how a Fed rate cut ripples through the mortgage market
+          - generic "Submit":
+            - img
+        - generic:
+          - generic:
+            - generic:
+              - generic: ⌘
+              - generic: ⏎
+              - generic: submit
+            - generic:
+              - generic: esc
+              - generic: close
+          - generic:
+            - generic: mira
+    - generic:
+      - generic: playing
+      - generic: ·
+      - generic: Fed rate cut
+  - button "Open Next.js Dev Tools" [ref=e17] [cursor=pointer]:
+    - img [ref=e18]
+  - alert [ref=e11]

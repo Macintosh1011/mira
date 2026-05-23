@@ -1,235 +1,217 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { EXAMPLE_QUERIES } from "@/lib/examples";
-import { isSTTSupported, startDictation, type STTHandle } from "@/lib/voice/stt";
-import {
-  IconMic,
-  IconArrowReturn,
-  IconSparkle,
-  IconClose,
-} from "./icons";
+import { useEffect, useRef } from "react";
+import { Mic, CornerDownLeft, History } from "lucide-react";
 
-interface CommandPaletteProps {
-  open: boolean;
-  onClose: () => void;
-  onSubmit: (query: string) => void;
-  /** True once a scene exists — switches placeholder to follow-up framing. */
-  hasScene: boolean;
-}
+export type AgentState = "idle" | "active" | "done" | "failed";
+export type PalettePhase =
+  | "active"
+  | "listening"
+  | "generating"
+  | "playing"
+  | "paused"
+  | "morphing";
 
-const accentMap = {
-  yellow: "var(--c-yellow)",
-  green: "var(--c-green)",
-  blue: "var(--c-blue)",
-  terra: "var(--c-terra)",
-} as const;
+const AGENT_LABELS = ["plan", "gen", "voice", "check"] as const;
 
-/** Thin gate: only mount the panel while open so its state starts fresh. */
-export default function CommandPalette(props: CommandPaletteProps) {
-  if (!props.open) return null;
-  return <PalettePanel {...props} />;
-}
-
-function PalettePanel({ onClose, onSubmit, hasScene }: CommandPaletteProps) {
-  const [value, setValue] = useState("");
-  const [listening, setListening] = useState(false);
-  const [active, setActive] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const sttRef = useRef<STTHandle | null>(null);
-  const sttOk = isSTTSupported();
-
-  // Filter examples by the current text (so it doubles as a search).
-  const matches = EXAMPLE_QUERIES.filter((e) =>
-    `${e.domain} ${e.query}`.toLowerCase().includes(value.toLowerCase()),
-  );
-
-  // focus on mount; stop any dictation when the panel unmounts (close)
-  useEffect(() => {
-    requestAnimationFrame(() => inputRef.current?.focus());
-    return () => sttRef.current?.stop();
-  }, []);
-
-  const fire = (q: string) => {
-    const query = q.trim();
-    if (!query) return;
-    sttRef.current?.stop();
-    setListening(false);
-    setValue("");
-    onSubmit(query);
-  };
-
-  const toggleMic = () => {
-    if (!sttOk) return;
-    if (listening) {
-      sttRef.current?.stop();
-      setListening(false);
-      return;
-    }
-    setListening(true);
-    sttRef.current = startDictation({
-      onTranscript: (text, isFinal) => {
-        setValue(text);
-        if (isFinal) {
-          setListening(false);
-          // small beat so the user sees the transcript land, then fire
-          setTimeout(() => fire(text), 350);
-        }
-      },
-      onError: () => setListening(false),
-      onEnd: () => setListening(false),
-    });
-  };
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (value.trim()) fire(value);
-      else if (matches[active]) fire(matches[active].query);
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setActive((a) => Math.min(a + 1, matches.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActive((a) => Math.max(a - 1, 0));
-    }
-  };
-
+function AgentActivityRow({ states }: { states: AgentState[] }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center sm:px-4 sm:pt-[16vh]"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      {/* scrim */}
-      <div className="absolute inset-0 bg-black/55 backdrop-blur-[3px] anim-fade-up" />
+    <div className="agents">
+      {AGENT_LABELS.map((label, i) => {
+        const s = states[i] ?? "idle";
+        return (
+          <div className={`agent ${s}`} key={label}>
+            <span className={`agent-dot ${s}`} />
+            <span className="agent-label">{label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
-      {/* mobile: full-bleed top sheet. desktop: centered floating card. */}
-      <div
-        className="glass-raised anim-fade-up relative z-10 flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-none shadow-[0_40px_120px_-20px_rgba(0,0,0,0.8)] sm:h-auto sm:rounded-2xl"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Ask Mira"
-      >
-        {/* input row */}
-        <div className="flex items-center gap-3 px-5 py-4">
-          <IconSparkle className="shrink-0 text-coral" />
-          <input
-            ref={inputRef}
-            value={value}
-            onChange={(e) => {
-              setValue(e.target.value);
-              setActive(0);
+function RecentQueries({
+  items,
+  onPick,
+}: {
+  items: string[];
+  onPick: (q: string) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <div className="recent">
+      <div className="recent-label">
+        <History size={12} strokeWidth={1.5} />
+        Recent
+      </div>
+      {items.map((q, i) => (
+        <div
+          key={i}
+          className="recent-item"
+          onClick={() => onPick(q)}
+          title={q}
+        >
+          <span className="ri-dot" />
+          <span className="ri-text">{q}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface Hint {
+  keys: string[];
+  label: string;
+}
+
+const FOOTER_HINTS: Record<PalettePhase, Hint[]> = {
+  active: [
+    { keys: ["⌘", "⏎"], label: "submit" },
+    { keys: ["esc"], label: "close" },
+  ],
+  listening: [{ keys: ["esc"], label: "cancel" }],
+  generating: [{ keys: ["esc"], label: "cancel" }],
+  playing: [
+    { keys: ["space"], label: "pause" },
+    { keys: ["⌘", "K"], label: "follow-up" },
+  ],
+  paused: [
+    { keys: ["space"], label: "play" },
+    { keys: ["⌘", "K"], label: "follow-up" },
+  ],
+  morphing: [
+    { keys: ["⌘", "⏎"], label: "submit" },
+    { keys: ["esc"], label: "cancel" },
+  ],
+};
+
+function PaletteFooter({ hints }: { hints: Hint[] }) {
+  return (
+    <div className="footer">
+      <div className="footer-group">
+        {hints.map((h, i) => (
+          <span className="footer-item" key={i}>
+            {h.keys.map((k, j) => (
+              <span key={j} className="kbd">
+                {k}
+              </span>
+            ))}
+            <span style={{ marginLeft: 4 }}>{h.label}</span>
+          </span>
+        ))}
+      </div>
+      <div className="footer-group" style={{ color: "var(--fg-subtle)" }}>
+        <span className="footer-item" style={{ opacity: 0.7 }}>
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 3,
+              background: "var(--accent)",
+              display: "inline-block",
             }}
-            onKeyDown={onKeyDown}
-            placeholder={
-              listening
-                ? "Listening…"
-                : hasScene
-                  ? "Ask a follow-up to morph the scene…"
-                  : "Describe an idea to visualize…"
-            }
-            className="min-w-0 flex-1 bg-transparent font-serif text-lg text-ink placeholder:text-ink-faint focus:outline-none sm:text-xl"
-            aria-label="Query"
           />
-
-          <button
-            onClick={toggleMic}
-            disabled={!sttOk}
-            title={sttOk ? "Speak your idea" : "Voice input not supported here"}
-            className={`relative grid h-9 w-9 shrink-0 place-items-center rounded-full border transition-colors ${
-              listening
-                ? "anim-mic border-coral/60 bg-coral text-paper"
-                : "border-hairline-strong text-ink-dim hover:border-coral/40 hover:text-coral disabled:opacity-30 disabled:hover:border-hairline-strong disabled:hover:text-ink-dim"
-            }`}
-            aria-pressed={listening}
-            aria-label="Toggle voice input"
-          >
-            <IconMic />
-          </button>
-
-          <button
-            onClick={onClose}
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink-faint transition-colors hover:bg-white/5 hover:text-ink sm:hidden"
-            aria-label="Close"
-          >
-            <IconClose />
-          </button>
-        </div>
-
-        <div className="h-px w-full bg-[var(--hairline)]" />
-
-        {/* examples / matches */}
-        <div className="scroll-thin flex-1 overflow-y-auto p-2 sm:max-h-[46vh] sm:flex-none">
-          <div className="px-3 pb-1 pt-2">
-            <span className="label">
-              {value ? "Matches" : hasScene ? "Or start fresh" : "Try one of these"}
-            </span>
-          </div>
-          {matches.length === 0 ? (
-            <div className="px-3 py-6 text-sm text-ink-faint">
-              Press <Kbd>↵</Kbd> to visualize{" "}
-              <span className="text-ink-dim">“{value}”</span>
-            </div>
-          ) : (
-            matches.map((ex, i) => (
-              <button
-                key={ex.query}
-                onMouseEnter={() => setActive(i)}
-                onClick={() => fire(ex.query)}
-                className={`group flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors ${
-                  i === active ? "bg-white/[0.055]" : "hover:bg-white/[0.03]"
-                }`}
-              >
-                <span
-                  className="mt-0.5 h-8 w-[3px] shrink-0 rounded-full"
-                  style={{ background: accentMap[ex.accent] }}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="label block">{ex.domain}</span>
-                  <span className="mt-0.5 block truncate font-serif text-[15px] text-ink">
-                    {ex.query}
-                  </span>
-                </span>
-                <IconArrowReturn
-                  className={`shrink-0 text-ink-faint transition-opacity ${
-                    i === active ? "opacity-100" : "opacity-0"
-                  }`}
-                />
-              </button>
-            ))
-          )}
-        </div>
-
-        {/* footer hint */}
-        <div className="flex items-center justify-between border-t border-[var(--hairline)] px-5 py-2.5">
-          <div className="flex items-center gap-3 text-[11px] text-ink-faint">
-            <span className="flex items-center gap-1.5">
-              <Kbd>↑</Kbd>
-              <Kbd>↓</Kbd> navigate
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Kbd>↵</Kbd> visualize
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Kbd>esc</Kbd> close
-            </span>
-          </div>
-          <span className="label hidden sm:inline">Mira</span>
-        </div>
+          mira
+        </span>
       </div>
     </div>
   );
 }
 
-function Kbd({ children }: { children: React.ReactNode }) {
+interface CommandPaletteProps {
+  visible: boolean;
+  dismissing: boolean;
+  phase: PalettePhase;
+  inputValue: string;
+  micActive: boolean;
+  showAgents: boolean;
+  agentStates: AgentState[];
+  showRecent: boolean;
+  recents: string[];
+  onInputChange: (value: string) => void;
+  onSubmit: () => void;
+  onMicToggle: () => void;
+  onPickRecent: (q: string) => void;
+}
+
+export default function CommandPalette({
+  visible,
+  dismissing,
+  phase,
+  inputValue,
+  micActive,
+  showAgents,
+  agentStates,
+  showRecent,
+  recents,
+  onInputChange,
+  onSubmit,
+  onMicToggle,
+  onPickRecent,
+}: CommandPaletteProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (visible) inputRef.current?.focus();
+  }, [visible]);
+
+  const armed = inputValue.trim().length > 0;
+  const hints = FOOTER_HINTS[phase] ?? FOOTER_HINTS.active;
+  const showDivider = showAgents || showRecent;
+  const inputDisabled = phase === "generating" || phase === "listening";
+
   return (
-    <kbd className="inline-grid h-5 min-w-5 place-items-center rounded border border-[var(--hairline-strong)] bg-white/[0.03] px-1.5 font-mono text-[10px] text-ink-dim">
-      {children}
-    </kbd>
+    <div
+      className={`palette-wrap ${visible ? "show" : ""} ${
+        dismissing ? "dismissing" : ""
+      }`}
+    >
+      <div className="palette">
+        <div className="palette-input-row">
+          <button
+            className={`mic-btn ${micActive ? "active" : ""}`}
+            tabIndex={-1}
+            onClick={onMicToggle}
+            aria-label="Toggle voice input"
+          >
+            <Mic size={20} strokeWidth={1.5} />
+          </button>
+          <input
+            ref={inputRef}
+            className="palette-input"
+            value={inputValue}
+            onChange={(e) => onInputChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && armed) {
+                e.preventDefault();
+                onSubmit();
+              }
+            }}
+            placeholder="Speak or type a question…"
+            spellCheck={false}
+            readOnly={inputDisabled}
+            aria-label="Question"
+          />
+          <span
+            className={`submit-cue ${armed ? "armed" : ""}`}
+            title="Submit"
+            onClick={() => armed && onSubmit()}
+            style={{ cursor: armed ? "pointer" : "default" }}
+          >
+            <CornerDownLeft size={14} strokeWidth={1.5} />
+          </span>
+        </div>
+
+        {showDivider && <div className="palette-divider" />}
+
+        {showAgents && <AgentActivityRow states={agentStates} />}
+
+        {showAgents && showRecent && <div className="palette-divider" />}
+
+        {showRecent && <RecentQueries items={recents} onPick={onPickRecent} />}
+
+        <PaletteFooter hints={hints} />
+      </div>
+    </div>
   );
 }

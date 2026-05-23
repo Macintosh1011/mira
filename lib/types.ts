@@ -4,6 +4,8 @@
  * import from here. Do not redefine these shapes anywhere else.
  */
 
+import type { Kit } from "@/lib/kit";
+
 /** 2D scenes render with p5.js, 3D scenes with three.js. */
 export type Renderer = "2d" | "3d";
 
@@ -69,6 +71,7 @@ export interface RenderLibs {
   THREE: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   gsap: any;
+  kit: Kit;
 }
 
 export type RenderModule = (

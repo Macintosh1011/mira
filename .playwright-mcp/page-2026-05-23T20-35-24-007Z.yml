@@ -1,0 +1,37 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e4]:
+      - heading "Mira" [level=1] [ref=e5]
+      - paragraph [ref=e6]: The visualization layer for thinking.
+      - button "⌘ K to begin" [ref=e7] [cursor=pointer]:
+        - generic [ref=e8]: ⌘
+        - generic [ref=e9]: K
+        - generic [ref=e10]: to begin
+    - generic:
+      - button "Pause":
+        - img
+      - button "Ask follow-up":
+        - img
+    - generic:
+      - generic:
+        - generic:
+          - button "Toggle voice input":
+            - img
+          - textbox "Question":
+            - /placeholder: Speak or type a question…
+          - generic "Submit":
+            - img
+        - generic:
+          - generic:
+            - generic:
+              - generic: ⌘
+              - generic: ⏎
+              - generic: submit
+            - generic:
+              - generic: esc
+              - generic: close
+          - generic:
+            - generic: mira
+    - generic:
+      - generic: empty
+  - alert [ref=e11]
