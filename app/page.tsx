@@ -13,7 +13,7 @@ import { PhaseIndicator } from "@/components/canvas/CanvasShared";
 import RenderHost from "@/lib/render/RenderHost";
 import SimHost from "@/lib/render/SimHost";
 import SceneControls from "@/components/SceneControls";
-import LandingDetail from "@/components/landing/LandingDetail";
+import PromptTeaser from "@/components/landing/PromptTeaser";
 import { getSim } from "@/lib/sims";
 import { loadRenderLibs } from "@/lib/render/libs";
 import { RECENTS } from "@/lib/topics";
@@ -238,7 +238,7 @@ export default function Page() {
               <span className="kbd">K</span>
               <span style={{ marginLeft: 4 }}>to begin</span>
             </button>
-            <LandingDetail onPick={submit} />
+            <PromptTeaser onActivate={openPalette} />
           </div>
         </div>
       )}

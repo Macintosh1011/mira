@@ -240,77 +240,51 @@ textarea::placeholder {
 /*  Landing detail (lede + example-query gallery)              */
 /* ─────────────────────────────────────────────────────────── */
 
-.landing-detail {
-  margin-top: 56px;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
+/* Auto-typing prompt teaser beneath the wordmark. */
+.prompt-teaser {
+  margin-top: 44px;
+  display: inline-flex;
   align-items: center;
+  gap: 12px;
+  background: transparent;
+  cursor: pointer;
+  min-height: 24px;
+  max-width: min(640px, 90vw);
   animation: fadeInUp 700ms var(--ease-smooth) both;
-  animation-delay: 120ms;
+  animation-delay: 160ms;
 }
-
-.landing-lede {
-  font-size: 15px;
-  line-height: 1.6;
-  color: var(--fg-muted);
-  text-align: center;
-  max-width: 460px;
-  margin: 0 0 36px;
-}
-
-.landing-gallery {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 40px;
-  width: 100%;
-  text-align: left;
-}
-
-.lg-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.lg-field {
+.pt-prefix {
   font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--accent);
-  opacity: 0.65;
+  color: var(--fg-subtle);
+  flex-shrink: 0;
 }
-.lg-queries {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.lg-query {
-  display: block;
-  width: 100%;
-  text-align: left;
-  font-size: 13.5px;
-  line-height: 1.4;
-  color: var(--fg-muted);
-  padding: 7px 10px;
-  margin-left: -10px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  transition: color 160ms var(--ease-default),
-    background 160ms var(--ease-default),
-    border-color 160ms var(--ease-default);
-}
-.lg-query:hover {
+.pt-text {
+  font-family: var(--font-mono);
+  font-size: 16px;
   color: var(--fg);
-  background: rgba(255, 255, 255, 0.035);
-  border-color: var(--border);
+  letter-spacing: -0.01em;
+  text-align: left;
+  white-space: nowrap;
 }
-.lg-query-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.pt-caret {
+  width: 2px;
+  height: 1.05em;
+  background: var(--accent);
+  display: inline-block;
+  animation: ptBlink 1.05s steps(1) infinite;
+}
+@keyframes ptBlink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
 }
 
 /* Mobile: stack as a single column of chips, smaller wordmark gap. */
@@ -325,18 +299,11 @@ textarea::placeholder {
   .empty-hint {
     margin-top: 40px;
   }
-  .landing-detail {
-    margin-top: 44px;
+  .prompt-teaser {
+    margin-top: 32px;
+    max-width: 90vw;
   }
-  .landing-lede {
-    font-size: 14px;
-    margin-bottom: 28px;
-  }
-  .landing-gallery {
-    grid-template-columns: 1fr;
-    gap: 20px;
-  }
-  .lg-query {
+  .pt-text {
     font-size: 14px;
   }
 }
