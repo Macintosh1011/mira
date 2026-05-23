@@ -740,7 +740,7 @@ function mountEquation(
   if (!renderToString || typeof document === "undefined") return null;
 
   try {
-    const html = renderToString(tex, { throwOnError: false, displayMode: false });
+    const html = renderToString(tex, { throwOnError: false, output: "html", displayMode: false });
     const el = document.createElement("div");
     el.innerHTML = html;
     el.style.position = "absolute";

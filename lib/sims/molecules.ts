@@ -501,11 +501,11 @@ const sim: Sim = {
     const balancedEq = content.equation ?? "2\\,H_2 + O_2 \\;\\longrightarrow\\; 2\\,H_2O";
     try {
       eqEl.innerHTML = libs.katex.renderToString(balancedEq, {
-        throwOnError: false,
+        throwOnError: false, output: "html",
         displayMode: true,
       });
       rateEl.innerHTML = libs.katex.renderToString("k = A\\,e^{-E_a / RT}", {
-        throwOnError: false,
+        throwOnError: false, output: "html",
         displayMode: true,
       });
     } catch {

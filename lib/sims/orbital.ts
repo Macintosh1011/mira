@@ -466,7 +466,7 @@ function buildOverlay(container: HTMLElement, libs: SimLibs, content: SceneConte
   const renderEq = (tex: string): string => {
     if (libs.katex && typeof libs.katex.renderToString === "function") {
       try {
-        return libs.katex.renderToString(tex, { throwOnError: false, displayMode: false });
+        return libs.katex.renderToString(tex, { throwOnError: false, output: "html", displayMode: false });
       } catch {
         return tex;
       }

@@ -133,7 +133,7 @@ const sim: Sim = {
       const src = content.equation ?? latex;
       eqEl.innerHTML = katex.renderToString(src, {
         displayMode: true,
-        throwOnError: false,
+        throwOnError: false, output: "html",
       });
     }
 

@@ -593,7 +593,7 @@ function mountEquation(
   if (!renderToString) return null;
 
   try {
-    const html = renderToString(tex, { throwOnError: false, displayMode: false });
+    const html = renderToString(tex, { throwOnError: false, output: "html", displayMode: false });
     if (typeof document === "undefined") return null;
     const el = document.createElement("div");
     el.innerHTML = html;

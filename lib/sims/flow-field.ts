@@ -730,7 +730,7 @@ function positionEquation(ov: EqOverlay, opts: EqOpts): void {
     ov.lastTex = opts.latex;
     try {
       el.innerHTML = katex.renderToString(opts.latex, {
-        throwOnError: false,
+        throwOnError: false, output: "html",
         displayMode: false,
       });
     } catch {

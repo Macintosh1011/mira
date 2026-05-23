@@ -391,7 +391,7 @@ export const NeuralNetSim: Sim = {
       const src = state.mode === 1 ? ATTENTION_EQ : CLASSIFIER_EQ;
       try {
         eqEl.innerHTML = libs.katex.renderToString(src, {
-          throwOnError: false,
+          throwOnError: false, output: "html",
           displayMode: false,
         });
       } catch {

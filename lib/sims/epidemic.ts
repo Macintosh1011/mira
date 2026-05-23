@@ -333,7 +333,7 @@ export const epidemic: Sim = {
     const tex = (src: string): string => {
       try {
         return libs.katex.renderToString(src, {
-          throwOnError: false,
+          throwOnError: false, output: "html",
           displayMode: false,
         });
       } catch {
