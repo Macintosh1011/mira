@@ -45,3 +45,6 @@ next-env.d.ts
 
 # agent debug artifacts
 .playwright-mcp/
+
+# local claude tooling config
+.claude/
