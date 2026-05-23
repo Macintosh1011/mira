@@ -13,7 +13,9 @@ export const CommandBar: React.FC<{
   armed: number; // 0..1 submit-armed glow
   width?: number;
 }> = ({ text, reveal, caret, micPulse, armed, width = 720 }) => {
-  const shown = text.slice(0, Math.round(text.length * reveal));
+  const cut = Math.round(text.length * reveal);
+  const shown = text.slice(0, cut);
+  const rest = text.slice(cut); // kept in layout (transparent) so the bar never reflows
   const accent = rgb(C.accent);
   return (
     <div
@@ -30,8 +32,8 @@ export const CommandBar: React.FC<{
         display: "flex",
         alignItems: "center",
         gap: 18,
-        height: 76,
-        padding: "0 26px",
+        minHeight: 76,
+        padding: "20px 26px",
       }}
     >
       {/* mic */}
@@ -68,14 +70,14 @@ export const CommandBar: React.FC<{
       <div
         style={{
           flex: 1,
+          minWidth: 0,
           fontFamily: FONT.mono,
           fontSize: 22,
+          lineHeight: 1.5,
           color: rgb(C.fg),
           letterSpacing: "-0.01em",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          display: "flex",
-          alignItems: "center",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
         }}
       >
         <span>{shown}</span>
@@ -83,12 +85,14 @@ export const CommandBar: React.FC<{
           style={{
             display: "inline-block",
             width: 2,
-            height: 26,
-            marginLeft: 3,
+            height: "1em",
+            verticalAlign: "middle",
+            margin: "0 1px",
             background: accent,
             opacity: caret,
           }}
         />
+        <span style={{ opacity: 0 }}>{rest}</span>
       </div>
 
       {/* submit cue */}
