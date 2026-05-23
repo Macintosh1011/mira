@@ -17,7 +17,7 @@ import {
   type Schema,
   type GenOptions,
 } from "@/lib/gemini";
-import type { ScenePlan, NarrationCue } from "@/lib/types";
+import type { ScenePlan, NarrationCue, Familiarity } from "@/lib/types";
 
 const NARRATION_SCHEMA: Schema = {
   type: Type.OBJECT,
@@ -58,6 +58,16 @@ Hard requirements for every line:
 
 Write exactly one line per phase, in phase order, matched by phaseId. The lines are spoken over animation beats, so phase N's line must describe the mechanism revealed at beat N.`;
 
+// Per-level voice directive appended to the narration prompt. It changes
+// vocabulary and depth, not the timeline math. "familiar" is the default voice.
+const FAMILIARITY_VOICE: Record<Familiarity, string> = {
+  novice:
+    "Viewer level: NOVICE. Use plain, everyday language. Define every technical term in the same breath you introduce it, or avoid it entirely. Reach for a concrete analogy when it makes the mechanism click. Never leave jargon unexplained. Slightly fewer ideas, fully landed.",
+  familiar: "",
+  expert:
+    "Viewer level: EXPERT. Assume a strong background; do not define standard terms. Use the correct technical vocabulary directly and stay concise and quantitative — lead with the precise mechanism, symbols, and numbers, no hand-holding.",
+};
+
 interface RawNarration {
   lines?: unknown;
 }
@@ -86,14 +96,17 @@ export interface NarrationInput {
   plan: ScenePlan;
   query: string;
   abortSignal?: AbortSignal;
+  /** Viewer level; tunes vocabulary + depth. Defaults to "familiar". */
+  familiarity?: Familiarity;
 }
 
 export async function generateNarration(
   input: NarrationInput,
 ): Promise<NarrationCue[]> {
   const { plan, query, abortSignal } = input;
+  const familiarity = input.familiarity ?? "familiar";
 
-  const prompt = `Topic the viewer asked about: "${query}"
+  const basePrompt = `Topic the viewer asked about: "${query}"
 Title shown on screen: ${plan.title}
 Visual archetype: ${plan.sceneType}
 
@@ -116,6 +129,9 @@ ${plan.phases
     .join("\n")}
 
 Write one line per phase. Each must explain the mechanism behind that beat with correct technical substance, build on the prior line, and name the quantities shown.`;
+
+  const voice = FAMILIARITY_VOICE[familiarity];
+  const prompt = voice ? `${basePrompt}\n\n${voice}` : basePrompt;
 
   const opts: GenOptions = {
     systemInstruction: SYSTEM,

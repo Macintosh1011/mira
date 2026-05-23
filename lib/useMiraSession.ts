@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  Familiarity,
   GenerateEvent,
   NarrationCue,
   Renderer,
@@ -14,8 +15,9 @@ import { matchTopic, type Topic } from "@/lib/topics";
 import type { AgentState } from "@/components/CommandPalette";
 
 /**
- * The six-state shell machine, plus the `paused` sub-state.
- * `empty -> active -> listening -> generating -> playing -> morphing`.
+ * The shell state machine, plus the `paused` sub-state.
+ * `empty -> active -> listening -> generating -> playing -> ended`, with
+ * `morphing` reachable from playing/paused/ended for a follow-up.
  */
 export type Phase =
   | "empty"
@@ -24,13 +26,22 @@ export type Phase =
   | "generating"
   | "playing"
   | "paused"
+  | "ended"
   | "morphing";
+
+export type { Familiarity };
 
 /** How the current scene is being rendered. */
 export type SceneKind = "topic" | "live";
 
 /** A unified, playable scene — whether hand-authored or live-generated. */
 export interface ActiveScene {
+  /**
+   * Stable scene id. For live scenes it's the backend `SceneBundle.sceneId`;
+   * for topics it's the topic id. Threaded back as `previousSceneId` on a
+   * follow-up so the backend morphs THIS scene.
+   */
+  id: string;
   kind: SceneKind;
   /** State-badge topic label. */
   label: string;
@@ -64,6 +75,7 @@ export interface MiraSession {
   captionIdx: number;
   scene: ActiveScene | null;
   error: string | null;
+  familiarity: Familiarity;
   /** Palette mount + animation flags (decoupled from phase for the dismiss fade). */
   paletteVisible: boolean;
   dismissing: boolean;
@@ -71,10 +83,14 @@ export interface MiraSession {
   openPalette: () => void;
   closePalette: () => void;
   setInput: (value: string) => void;
+  setFamiliarity: (value: Familiarity) => void;
   toggleMic: () => void;
   submit: (query: string) => void;
   togglePause: () => void;
+  replay: () => void;
   openFollowUp: () => void;
+  cancelFollowUp: () => void;
+  endScene: () => void;
 }
 
 // How long the final caption + canvas linger after the last cue's audio ends,
@@ -119,6 +135,7 @@ function agentsForEvent(
 
 function topicToScene(topic: Topic, renderRev: number): ActiveScene {
   return {
+    id: topic.id,
     kind: "topic",
     label: topic.label,
     phaseLabels: topic.phaseLabels,
@@ -146,6 +163,7 @@ export function useMiraSession(): MiraSession {
   const [captionIdx, setCaptionIdx] = useState(-1);
   const [scene, setScene] = useState<ActiveScene | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [familiarity, setFamiliarityState] = useState<Familiarity>("familiar");
   const [paletteVisible, setPaletteVisible] = useState(false);
   const [dismissing, setDismissing] = useState(false);
 
@@ -153,9 +171,17 @@ export function useMiraSession(): MiraSession {
   const handleRef = useRef<GenerateHandle | null>(null);
   const sttRef = useRef<STTHandle | null>(null);
   const renderRevRef = useRef(0);
+  // Latest phase, read inside deferred timers (e.g. the scene-end caption fade)
+  // without making those callbacks re-bind on every phase change. Synced in an
+  // effect (writing a ref during render is disallowed by the React lint).
+  const phaseRef = useRef<Phase>("empty");
+  // Live scene currently on screen, mirrored in a ref so runGeneration can read
+  // its id for `previousSceneId` without re-binding on every scene change.
+  const sceneRef = useRef<ActiveScene | null>(null);
   // Live generation accumulates code + cues; promote to a scene on `done`.
   // `done` may also carry a simId + content (interactive-sim path).
   const liveRef = useRef<{
+    sceneId: string;
     code: string;
     renderer: Renderer;
     cues: NarrationCue[];
@@ -174,6 +200,18 @@ export function useMiraSession(): MiraSession {
     });
     narratorRef.current = n;
     return () => n.dispose();
+  }, []);
+
+  // Mirror the latest phase into a ref for deferred timers to read.
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  // Single writer for the on-screen scene: keeps the ref (read by
+  // runGeneration for previousSceneId) in lockstep with the rendered state.
+  const commitScene = useCallback((next: ActiveScene | null) => {
+    sceneRef.current = next;
+    setScene(next);
   }, []);
 
   const stopStt = useCallback(() => {
@@ -203,43 +241,52 @@ export function useMiraSession(): MiraSession {
       setDismissing(false);
     }, 200);
     setPhase("empty");
-    setScene(null);
+    commitScene(null);
     setCanvasPhase(-1);
     setCaptionIdx(-1);
-  }, [stopStt]);
+  }, [stopStt, commitScene]);
 
-  const startPlaying = useCallback((next: ActiveScene) => {
-    const n = narratorRef.current;
-    // Dismiss the palette (200ms fade) then mount the canvas + start narration.
-    setDismissing(true);
-    setPhase("playing");
-    window.setTimeout(() => {
-      setPaletteVisible(false);
-      setDismissing(false);
-      setScene(next);
-      if (!n) return;
-      // Scene end: after the last cue's audio ends, hold a short tail, then
-      // fade back to empty. onCue drives caption + phase the whole way here.
-      n.setOnComplete(() => {
-        setCaptionIdx(-1);
-        window.setTimeout(() => {
-          setPhase((p) => (p === "playing" ? "empty" : p));
-          setScene((s) => (s === next ? null : s));
-          setCanvasPhase(-1);
-        }, SCENE_END_TAIL_MS);
-      });
-      n.reset();
-      n.setCues(next.cues);
-      n.start(); // synchronously fires onCue(0) -> caption 0 + phase 0
-    }, 200);
-  }, []);
+  const startPlaying = useCallback(
+    (next: ActiveScene) => {
+      const n = narratorRef.current;
+      // Dismiss the palette (200ms fade) then mount the canvas + start narration.
+      setDismissing(true);
+      setPhase("playing");
+      window.setTimeout(() => {
+        setPaletteVisible(false);
+        setDismissing(false);
+        commitScene(next);
+        if (!n) return;
+        // Scene end: hold the finished scene on its last frame and enter the
+        // calm ENDED state instead of dumping back to the homepage. The canvas
+        // stays mounted at the final phase; the caption fades after a short
+        // tail. Esc starts over, ⌘K opens a follow-up.
+        n.setOnComplete(() => {
+          setPhase((p) => (p === "playing" ? "ended" : p));
+          window.setTimeout(() => {
+            // Fade the final caption only if we're still resting on this scene
+            // (not if the user has since replayed or opened a follow-up).
+            if (phaseRef.current === "ended") setCaptionIdx(-1);
+          }, SCENE_END_TAIL_MS);
+        });
+        n.reset();
+        n.setCues(next.cues);
+        n.start(); // synchronously fires onCue(0) -> caption 0 + phase 0
+      }, 200);
+    },
+    [commitScene],
+  );
 
   const runGeneration = useCallback(
     (query: string, mutate: boolean) => {
       handleRef.current?.abort();
-      liveRef.current = { code: "", renderer: "2d", cues: [] };
+      liveRef.current = { sceneId: "", code: "", renderer: "2d", cues: [] };
       setAgents(["active", "idle", "idle", "idle"]);
-      setPhase("generating");
+      // A follow-up (mutate) keeps the current scene mounted + dimmed under the
+      // palette while it regenerates — go to `morphing`, not `generating`, so
+      // the canvas isn't torn down. A fresh query shows the full agent dock.
+      const followUp = mutate && sceneRef.current !== null;
+      setPhase(followUp ? "morphing" : "generating");
       setPaletteVisible(true);
       setDismissing(false);
       setError(null);
@@ -248,7 +295,8 @@ export function useMiraSession(): MiraSession {
         {
           query,
           mode: mutate ? "mutate" : "new",
-          previousSceneId: undefined,
+          previousSceneId: followUp ? sceneRef.current?.id : undefined,
+          familiarity,
         },
         {
           onEvent: (event) => {
@@ -257,11 +305,13 @@ export function useMiraSession(): MiraSession {
             if (!live) return;
             if (event.type === "code_chunk") live.code += event.delta;
             if (event.type === "code_done") {
+              live.sceneId = event.sceneId;
               live.code = event.code;
               live.renderer = event.renderer;
             }
             if (event.type === "narration") live.cues.push(event.cue);
             if (event.type === "done") {
+              live.sceneId = event.bundle.sceneId;
               live.code = event.bundle.code;
               live.renderer = event.bundle.renderer;
               live.cues = event.bundle.narration;
@@ -279,6 +329,7 @@ export function useMiraSession(): MiraSession {
                   ? live.content.phases.map((p) => p.label)
                   : cues.map((_, i) => `phase ${i + 1}`);
               startPlaying({
+                id: live.sceneId || `scene-${renderRevRef.current}`,
                 kind: "live",
                 label: live.content?.title?.slice(0, 40) ?? query.slice(0, 40),
                 phaseLabels,
@@ -303,7 +354,7 @@ export function useMiraSession(): MiraSession {
       );
       handleRef.current = handle;
     },
-    [startPlaying],
+    [startPlaying, familiarity],
   );
 
   const submit = useCallback(
@@ -359,8 +410,23 @@ export function useMiraSession(): MiraSession {
     sttRef.current = handle;
   }, [micActive, stopStt]);
 
+  // Replay the on-screen scene from the top (from `ended`, or any time the user
+  // hits the replay control). Rewinds the Narrator and re-enters `playing`.
+  const replay = useCallback(() => {
+    const n = narratorRef.current;
+    if (!n || !sceneRef.current) return;
+    n.reset();
+    n.setCues(sceneRef.current.cues);
+    setPhase("playing");
+    n.start();
+  }, []);
+
   const togglePause = useCallback(() => {
     const n = narratorRef.current;
+    if (phase === "ended") {
+      replay();
+      return;
+    }
     setPhase((p) => {
       if (p === "playing") {
         n?.pause();
@@ -372,16 +438,47 @@ export function useMiraSession(): MiraSession {
       }
       return p;
     });
-  }, []);
+  }, [phase, replay]);
 
   const openFollowUp = useCallback(() => {
-    // Keep the canvas running underneath; reopen palette for a follow-up.
+    // Keep the canvas mounted underneath (dimmed); reopen the palette for a
+    // follow-up. Pause any in-flight narration so the scene freezes cleanly.
+    narratorRef.current?.pause();
     setPhase("morphing");
     setPaletteVisible(true);
     setDismissing(false);
     setInputState("");
     setAgents(["idle", "idle", "idle", "idle"]);
   }, []);
+
+  // Cancel a follow-up (esc / backdrop while morphing): abort any in-flight
+  // regeneration and fall back to the held scene's rest state rather than
+  // nuking it to the homepage. With no scene, behaves like closePalette.
+  const cancelFollowUp = useCallback(() => {
+    if (!sceneRef.current) {
+      closePalette();
+      return;
+    }
+    handleRef.current?.abort();
+    handleRef.current = null;
+    stopStt();
+    setDismissing(true);
+    window.setTimeout(() => {
+      setPaletteVisible(false);
+      setDismissing(false);
+    }, 200);
+    setPhase("ended");
+  }, [closePalette, stopStt]);
+
+  // Leave the ENDED rest state and start over from the homepage.
+  const endScene = useCallback(() => {
+    closePalette();
+  }, [closePalette]);
+
+  const setFamiliarity = useCallback(
+    (value: Familiarity) => setFamiliarityState(value),
+    [],
+  );
 
   const setInput = useCallback((value: string) => setInputState(value), []);
 
@@ -398,14 +495,19 @@ export function useMiraSession(): MiraSession {
     captionIdx,
     scene,
     error,
+    familiarity,
     paletteVisible,
     dismissing,
     openPalette,
     closePalette,
     setInput,
+    setFamiliarity,
     toggleMic,
     submit,
     togglePause,
+    replay,
     openFollowUp,
+    cancelFollowUp,
+    endScene,
   };
 }

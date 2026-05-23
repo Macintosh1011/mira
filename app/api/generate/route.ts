@@ -206,6 +206,7 @@ async function runGeneration(
   req: GenerateRequest,
 ): Promise<void> {
   const query = req.query?.trim() ?? "";
+  const familiarity = req.familiarity ?? "familiar";
 
   // Direct cache resolve for instant example-button playback: a mutate against
   // a cached scene, or a query that exactly equals a cached scene id, replays
@@ -254,6 +255,7 @@ async function runGeneration(
         abortSignal: signal,
         previousPlan: prior?.plan,
         previousSimId: prior?.simId,
+        familiarity,
       }),
     );
   } catch {
@@ -271,7 +273,7 @@ async function runGeneration(
     let narration: NarrationCue[];
     try {
       narration = await withDeadline(PLAN_BUDGET_MS, (signal) =>
-        generateNarration({ plan, query, abortSignal: signal }),
+        generateNarration({ plan, query, abortSignal: signal, familiarity }),
       );
     } catch {
       narration = narrationFromPlan(plan);
@@ -314,7 +316,7 @@ async function runGeneration(
   let narration: NarrationCue[];
   try {
     narration = await withDeadline(PLAN_BUDGET_MS, (signal) =>
-      generateNarration({ plan, query, abortSignal: signal }),
+      generateNarration({ plan, query, abortSignal: signal, familiarity }),
     );
   } catch {
     narration = narrationFromPlan(plan);
@@ -404,10 +406,15 @@ export async function POST(request: Request): Promise<Response> {
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
+  const familiarity =
+    body.familiarity === "novice" || body.familiarity === "expert"
+      ? body.familiarity
+      : "familiar";
   const req: GenerateRequest = {
     query: body.query,
     mode: body.mode === "mutate" ? "mutate" : "new",
     previousSceneId: body.previousSceneId,
+    familiarity,
   };
 
   const stream = new ReadableStream<Uint8Array>({

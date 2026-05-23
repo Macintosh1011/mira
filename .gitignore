@@ -54,3 +54,6 @@ next-env.d.ts
 app/__simtest/
 /sig-rc2.png
 /signal-rc.png
+
+# local-only preview harness
+app/simtest/

@@ -29,6 +29,7 @@ import type {
   SceneType,
   SceneContentItem,
   SceneContent,
+  Familiarity,
 } from "@/lib/types";
 import { SIM_IDS, type SimId } from "@/lib/sims";
 import { isSceneType } from "./archetypes";
@@ -63,6 +64,36 @@ export type OrchestratorResult =
 
 export function isSimPlan(r: OrchestratorResult): r is SimPlan {
   return r.kind === "sim";
+}
+
+// ── familiarity tuning ──────────────────────────────────────────────────────
+// One directive, injected into BOTH the archetype plan prompt and the sim
+// content prompt, so the model genuinely changes phase count, label/value
+// technicality, and framing by level. "familiar" is the unmodified default.
+const FAMILIARITY_PLAN: Record<Familiarity, string> = {
+  novice:
+    "Viewer level: NOVICE. Keep it to 2-3 phases. Use plain, everyday labels (no jargon as the title). Frame the whole scene around a single concrete everyday analogy. Use rounded, illustrative values (e.g. 'about half', '~4%', 'twice as fast') rather than exact figures. Skip the formal equation framing.",
+  familiar: "",
+  expert:
+    "Viewer level: EXPERT. Use 4-5 phases for full mechanistic depth. Labels and sublabels must be the precise technical terms of the field. Values must be exact quantities with correct units and symbols. Emphasize the governing equation/relation and the precise variables it relates.",
+};
+
+const FAMILIARITY_SIM: Record<Familiarity, string> = {
+  novice:
+    "Viewer level: NOVICE. Use exactly 3 phases. Phase labels are plain everyday words, not jargon. Values are rounded and illustrative, not precise figures. The equation can stay but pick the simplest correct form.",
+  familiar: "",
+  expert:
+    "Viewer level: EXPERT. Use 4-5 phases. Phase labels are precise field-standard technical terms; values are exact quantities with correct units/symbols. The equation must be the full governing relation for the phenomenon.",
+};
+
+/** Append the level directive to a prompt; "familiar" is a no-op default. */
+function withFamiliarity(
+  prompt: string,
+  table: Record<Familiarity, string>,
+  familiarity: Familiarity,
+): string {
+  const directive = table[familiarity];
+  return directive ? `${prompt}\n\n${directive}` : prompt;
 }
 
 // ── sim classification ──────────────────────────────────────────────────────
@@ -664,10 +695,11 @@ function defaultSimContent(simId: SimId, query: string): SimPlan {
 async function planSimContent(
   simId: SimId,
   query: string,
+  familiarity: Familiarity,
   abortSignal?: AbortSignal,
 ): Promise<SimPlan> {
   const spec = SIM_CONTENT_SPECS[simId];
-  const prompt = `User question: "${query}"
+  const basePrompt = `User question: "${query}"
 Chosen simulation: ${simId}
 
 What it shows: ${spec.brief}
@@ -675,6 +707,7 @@ What it shows: ${spec.brief}
 Control params for this sim (use these EXACT keys): ${spec.paramHints}
 
 Produce the technical content. Phases must build the idea and be 1:1 with the spoken narration. The equation should be the governing relation for this phenomenon.`;
+  const prompt = withFamiliarity(basePrompt, FAMILIARITY_SIM, familiarity);
 
   let text: string;
   try {
@@ -882,16 +915,20 @@ export interface PlanInput {
   abortSignal?: AbortSignal;
   /** Present on mutate: the prior plan being morphed. */
   previousPlan?: ScenePlan;
+  /** Viewer level; tunes phase count + technicality. Defaults to "familiar". */
+  familiarity?: Familiarity;
 }
 
 /**
- * Plan an ARCHETYPE scene (the fallback lane). Unchanged behavior: structured
- * title + sceneType + per-phase content, with mutate morphing the prior plan.
+ * Plan an ARCHETYPE scene (the fallback lane). Structured title + sceneType +
+ * per-phase content, with mutate morphing the prior plan and familiarity tuning
+ * the depth/technicality.
  */
 export async function planScene(input: PlanInput): Promise<ScenePlan> {
   const { query, abortSignal, previousPlan } = input;
+  const familiarity = input.familiarity ?? "familiar";
 
-  const prompt = previousPlan
+  const basePrompt = previousPlan
     ? `The user is iterating on an existing visualization. Morph it; do not start over.
 
 Existing plan (JSON):
@@ -917,6 +954,8 @@ Return an evolved plan. Reuse phase ids where the beat carries over so the rende
     : `User question: "${query}"
 
 Produce the scene plan.`;
+
+  const prompt = withFamiliarity(basePrompt, FAMILIARITY_PLAN, familiarity);
 
   const opts: GenOptions = {
     systemInstruction: SYSTEM,
@@ -955,30 +994,49 @@ export interface OrchestrateInput {
   previousPlan?: ScenePlan;
   /** Present on mutate: the prior sim, so a follow-up keeps the same module. */
   previousSimId?: SimId;
+  /** Viewer level; tunes plan depth + narration. Defaults to "familiar". */
+  familiarity?: Familiarity;
 }
 
 /**
  * Route a query to either an interactive SIM (the preferred path for the 10
- * modules) or a hand-tuned ARCHETYPE scene. On mutate against a prior sim we keep
- * that module and just re-derive its content for the follow-up query.
+ * modules) or a hand-tuned ARCHETYPE scene.
+ *
+ * MUTATE keeps the follow-up ON the prior topic's lane so it evolves rather than
+ * jumping to an unrelated scene:
+ *  - prior was a SIM   -> stay on that module, re-derive content for the new query.
+ *  - prior was ARCHETYPE -> go straight to planScene with the prior plan as
+ *    context (do NOT re-classify the follow-up into a different sim, which would
+ *    drop the original topic).
  */
 export async function orchestrate(
   input: OrchestrateInput,
 ): Promise<OrchestratorResult> {
   const { query, abortSignal, previousPlan, previousSimId } = input;
+  const familiarity = input.familiarity ?? "familiar";
 
   // Mutate that started from a sim: stay on the same module, refresh content.
   if (previousSimId && isSimId(previousSimId)) {
-    const sim = await planSimContent(previousSimId, query, abortSignal);
-    return sim;
+    return planSimContent(previousSimId, query, familiarity, abortSignal);
+  }
+
+  // Mutate that started from an archetype: morph the prior plan in place. Skip
+  // sim re-classification so the follow-up stays on the original topic.
+  if (previousPlan) {
+    const plan = await planScene({
+      query,
+      abortSignal,
+      previousPlan,
+      familiarity,
+    });
+    return { kind: "archetype", ...plan };
   }
 
   const simId = await classifySim(query, abortSignal);
   if (simId) {
-    const sim = await planSimContent(simId, query, abortSignal);
-    return sim;
+    return planSimContent(simId, query, familiarity, abortSignal);
   }
 
-  const plan = await planScene({ query, abortSignal, previousPlan });
+  const plan = await planScene({ query, abortSignal, familiarity });
   return { kind: "archetype", ...plan };
 }

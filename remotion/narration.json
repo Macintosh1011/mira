@@ -1,0 +1,114 @@
+[
+  {
+    "id": "a1_1",
+    "role": "narrator",
+    "text": "Some ideas are impossible to understand from a static image.",
+    "file": "narration/a1_1.mp3",
+    "duration": 3.436553
+  },
+  {
+    "id": "a1_2",
+    "role": "narrator",
+    "text": "Because the process itself is the explanation.",
+    "file": "narration/a1_2.mp3",
+    "duration": 2.739955
+  },
+  {
+    "id": "u2",
+    "role": "user",
+    "text": "Mira... show me how a neural network recognizes a handwritten seven.",
+    "file": "narration/u2.mp3",
+    "duration": 4.318912
+  },
+  {
+    "id": "a3_1",
+    "role": "narrator",
+    "text": "The model doesn't see a number.",
+    "file": "narration/a3_1.mp3",
+    "duration": 1.811156
+  },
+  {
+    "id": "a3_2",
+    "role": "narrator",
+    "text": "It sees patterns.",
+    "file": "narration/a3_2.mp3",
+    "duration": 1.346757
+  },
+  {
+    "id": "a3_3",
+    "role": "narrator",
+    "text": "Early layers detect simple features. Edges, angles, intersections.",
+    "file": "narration/a3_3.mp3",
+    "duration": 4.551111
+  },
+  {
+    "id": "a3_4",
+    "role": "narrator",
+    "text": "Deeper layers combine them into abstract representations.",
+    "file": "narration/a3_4.mp3",
+    "duration": 3.529433
+  },
+  {
+    "id": "a3_5",
+    "role": "narrator",
+    "text": "Until one interpretation becomes dominant.",
+    "file": "narration/a3_5.mp3",
+    "duration": 2.414875
+  },
+  {
+    "id": "u4",
+    "role": "user",
+    "text": "Now show me why the model confuses it with a one.",
+    "file": "narration/u4.mp3",
+    "duration": 2.879274
+  },
+  {
+    "id": "a4_2",
+    "role": "narrator",
+    "text": "Small changes reshape the model's internal representation.",
+    "file": "narration/a4_2.mp3",
+    "duration": 3.575873
+  },
+  {
+    "id": "a4_3",
+    "role": "narrator",
+    "text": "The distinction between a seven and a one becomes uncertain.",
+    "file": "narration/a4_3.mp3",
+    "duration": 3.482993
+  },
+  {
+    "id": "a4_4",
+    "role": "narrator",
+    "text": "Ambiguity emerges inside the network itself.",
+    "file": "narration/a4_4.mp3",
+    "duration": 3.157914
+  },
+  {
+    "id": "a5_1",
+    "role": "narrator",
+    "text": "Behind the scenes, four Gemini agents collaborate in parallel. To plan, generate, narrate, and verify the simulation in real time.",
+    "file": "narration/a5_1.mp3",
+    "duration": 8.266304
+  },
+  {
+    "id": "a6_1",
+    "role": "narrator",
+    "text": "Understanding isn't static.",
+    "file": "narration/a6_1.mp3",
+    "duration": 1.857596
+  },
+  {
+    "id": "a6_2",
+    "role": "narrator",
+    "text": "It unfolds.",
+    "file": "narration/a6_2.mp3",
+    "duration": 1.160998
+  },
+  {
+    "id": "a6_3",
+    "role": "narrator",
+    "text": "Mira turns ideas into living simulations.",
+    "file": "narration/a6_3.mp3",
+    "duration": 2.925714
+  }
+]

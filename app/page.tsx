@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
-import { Pause, Play, MessageSquarePlus } from "lucide-react";
+import { Pause, Play, MessageSquarePlus, RotateCcw } from "lucide-react";
 import { useMiraSession } from "@/lib/useMiraSession";
 import CommandPalette, {
   type PalettePhase,
@@ -13,6 +13,7 @@ import { PhaseIndicator } from "@/components/canvas/CanvasShared";
 import RenderHost from "@/lib/render/RenderHost";
 import SimHost from "@/lib/render/SimHost";
 import SceneControls from "@/components/SceneControls";
+import LandingDetail from "@/components/landing/LandingDetail";
 import { getSim } from "@/lib/sims";
 import { loadRenderLibs } from "@/lib/render/libs";
 import { RECENTS } from "@/lib/topics";
@@ -40,15 +41,20 @@ export default function Page() {
     canvasPhase,
     captionIdx,
     scene,
+    familiarity,
     paletteVisible,
     dismissing,
     openPalette,
     closePalette,
     setInput,
+    setFamiliarity,
     toggleMic,
     submit,
     togglePause,
+    replay,
     openFollowUp,
+    cancelFollowUp,
+    endScene,
   } = session;
 
   const [controlsVisible, setControlsVisible] = useState(false);
@@ -106,8 +112,13 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [simId, scene?.renderRev]);
 
-  const isLive = phase === "playing" || phase === "paused" || phase === "morphing";
-  // Keep the prior scene mounted while a follow-up generates over it.
+  const isLive =
+    phase === "playing" ||
+    phase === "paused" ||
+    phase === "morphing" ||
+    phase === "ended";
+  // Keep the prior scene mounted while a follow-up generates over it, and hold
+  // it on screen in the rest state after narration ends.
   const showCanvas = scene !== null && phase !== "empty" && phase !== "active";
   const currentCaption =
     scene && captionIdx >= 0 ? scene.cues[captionIdx]?.text ?? null : null;
@@ -122,17 +133,37 @@ export default function Page() {
       if (cmd && e.key.toLowerCase() === "k") {
         e.preventDefault();
         if (phase === "empty") openPalette();
-        else if (phase === "playing" || phase === "paused") openFollowUp();
+        else if (
+          phase === "playing" ||
+          phase === "paused" ||
+          phase === "ended"
+        )
+          openFollowUp();
+        else if (phase === "morphing") cancelFollowUp();
         else closePalette();
         return;
       }
       if (e.key === "Escape") {
+        // From the calm ENDED rest state, esc starts over (back to empty).
+        if (phase === "ended") {
+          endScene();
+          return;
+        }
+        // Cancelling a follow-up returns to the held scene, not the homepage.
+        if (phase === "morphing") {
+          cancelFollowUp();
+          return;
+        }
         if (paletteVisible) closePalette();
         return;
       }
-      if (e.key === " " && (phase === "playing" || phase === "paused")) {
-        // don't hijack space while typing in the palette
-        if (document.activeElement?.tagName === "INPUT") return;
+      if (
+        e.key === " " &&
+        (phase === "playing" || phase === "paused" || phase === "ended")
+      ) {
+        // don't hijack space while typing in a palette field
+        const tag = document.activeElement?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
         e.preventDefault();
         togglePause();
       }
@@ -146,11 +177,20 @@ export default function Page() {
     closePalette,
     openFollowUp,
     togglePause,
+    cancelFollowUp,
+    endScene,
   ]);
 
   // ── Playback controls reveal on cursor move ─────────────────────────
   // The JSX gates visibility on phase, so we don't reset state on exit.
+  // While playing/paused they auto-hide after idle; in the ENDED rest state
+  // they stay pinned so the user always sees how to replay / follow up.
   useEffect(() => {
+    if (phase === "ended") {
+      // Deferred a tick so it isn't a synchronous setState in the effect body.
+      const t = window.setTimeout(() => setControlsVisible(true), 0);
+      return () => window.clearTimeout(t);
+    }
     if (phase !== "playing" && phase !== "paused") return;
     let timeout: number;
     const reveal = () => {
@@ -170,7 +210,10 @@ export default function Page() {
   }, [phase]);
 
   const palettePhase: PalettePhase =
-    phase === "empty" || phase === "playing" || phase === "paused"
+    phase === "empty" ||
+    phase === "playing" ||
+    phase === "paused" ||
+    phase === "ended"
       ? "active"
       : phase;
 
@@ -187,15 +230,7 @@ export default function Page() {
       {phase === "empty" && (
         <div className="empty">
           <NoiseField />
-          <div
-            style={{
-              position: "relative",
-              zIndex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-            }}
-          >
+          <div className="empty-stack">
             <h1 className="empty-wordmark">Mira</h1>
             <p className="empty-tagline">The visualization layer for thinking.</p>
             <button className="empty-hint" onClick={openPalette}>
@@ -203,6 +238,7 @@ export default function Page() {
               <span className="kbd">K</span>
               <span style={{ marginLeft: 4 }}>to begin</span>
             </button>
+            <LandingDetail onPick={submit} />
           </div>
         </div>
       )}
@@ -261,21 +297,28 @@ export default function Page() {
         </div>
       </div>
 
-      {/* Playback controls */}
+      {/* Playback controls — also pinned in the ENDED rest state */}
       <div
         className={`playback ${
-          controlsVisible && (phase === "playing" || phase === "paused")
+          controlsVisible &&
+          (phase === "playing" || phase === "paused" || phase === "ended")
             ? "show"
             : ""
         }`}
       >
         <button
           className="pb-btn"
-          onClick={togglePause}
-          title={phase === "paused" ? "Play" : "Pause"}
-          aria-label={phase === "paused" ? "Play" : "Pause"}
+          onClick={phase === "ended" ? replay : togglePause}
+          title={
+            phase === "ended" ? "Replay" : phase === "paused" ? "Play" : "Pause"
+          }
+          aria-label={
+            phase === "ended" ? "Replay" : phase === "paused" ? "Play" : "Pause"
+          }
         >
-          {phase === "paused" ? (
+          {phase === "ended" ? (
+            <RotateCcw size={16} strokeWidth={1.5} />
+          ) : phase === "paused" ? (
             <Play size={16} strokeWidth={1.5} />
           ) : (
             <Pause size={16} strokeWidth={1.5} />
@@ -291,8 +334,18 @@ export default function Page() {
         </button>
       </div>
 
-      {/* Interactive-sim slider panel — only while a sim scene plays/pauses */}
-      {(phase === "playing" || phase === "paused") &&
+      {/* ENDED rest-state hint — quiet affordance line, lower-center */}
+      <div className={`ended-hint ${phase === "ended" ? "show" : ""}`}>
+        <span className="kbd">⌘</span>
+        <span className="kbd">K</span>
+        <span className="eh-text">to ask a follow-up</span>
+        <span className="eh-sep">·</span>
+        <span className="kbd">esc</span>
+        <span className="eh-text">to start over</span>
+      </div>
+
+      {/* Interactive-sim slider panel — kept available through the rest state */}
+      {(phase === "playing" || phase === "paused" || phase === "ended") &&
         scene?.kind === "live" &&
         scene.simId &&
         simControls.length > 0 && (
@@ -326,6 +379,9 @@ export default function Page() {
         agentStates={agents}
         showRecent={phase === "active"}
         recents={RECENTS}
+        showFamiliarity={phase === "active" || phase === "morphing"}
+        familiarity={familiarity}
+        onFamiliarityChange={setFamiliarity}
         onInputChange={setInput}
         onSubmit={() => submit(input)}
         onMicToggle={toggleMic}

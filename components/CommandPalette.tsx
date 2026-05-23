@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { Mic, CornerDownLeft, History } from "lucide-react";
+import type { Familiarity } from "@/lib/useMiraSession";
 
 export type AgentState = "idle" | "active" | "done" | "failed";
 export type PalettePhase =
@@ -13,6 +14,12 @@ export type PalettePhase =
   | "morphing";
 
 const AGENT_LABELS = ["plan", "gen", "voice", "check"] as const;
+
+const FAMILIARITY_OPTIONS: { value: Familiarity; label: string }[] = [
+  { value: "novice", label: "Beginner" },
+  { value: "familiar", label: "Familiar" },
+  { value: "expert", label: "Expert" },
+];
 
 function AgentActivityRow({ states }: { states: AgentState[] }) {
   return (
@@ -26,6 +33,42 @@ function AgentActivityRow({ states }: { states: AgentState[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function FamiliarityToggle({
+  value,
+  onChange,
+}: {
+  value: Familiarity;
+  onChange: (v: Familiarity) => void;
+}) {
+  return (
+    <div
+      className="familiarity"
+      role="radiogroup"
+      aria-label="Explanation level"
+    >
+      <span className="fam-label">level</span>
+      <div className="fam-seg">
+        {FAMILIARITY_OPTIONS.map((opt) => {
+          const active = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              className={`fam-opt ${active ? "active" : ""}`}
+              tabIndex={-1}
+              onClick={() => onChange(opt.value)}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -66,7 +109,8 @@ interface Hint {
 
 const FOOTER_HINTS: Record<PalettePhase, Hint[]> = {
   active: [
-    { keys: ["⌘", "⏎"], label: "submit" },
+    { keys: ["⏎"], label: "submit" },
+    { keys: ["⇧", "⏎"], label: "newline" },
     { keys: ["esc"], label: "close" },
   ],
   listening: [{ keys: ["esc"], label: "cancel" }],
@@ -80,7 +124,8 @@ const FOOTER_HINTS: Record<PalettePhase, Hint[]> = {
     { keys: ["⌘", "K"], label: "follow-up" },
   ],
   morphing: [
-    { keys: ["⌘", "⏎"], label: "submit" },
+    { keys: ["⏎"], label: "submit" },
+    { keys: ["⇧", "⏎"], label: "newline" },
     { keys: ["esc"], label: "cancel" },
   ],
 };
@@ -128,11 +173,17 @@ interface CommandPaletteProps {
   agentStates: AgentState[];
   showRecent: boolean;
   recents: string[];
+  showFamiliarity: boolean;
+  familiarity: Familiarity;
+  onFamiliarityChange: (v: Familiarity) => void;
   onInputChange: (value: string) => void;
   onSubmit: () => void;
   onMicToggle: () => void;
   onPickRecent: (q: string) => void;
 }
+
+// Auto-grow ceiling: the textarea climbs to ~5 lines then scrolls.
+const TEXTAREA_MAX_PX = 132;
 
 export default function CommandPalette({
   visible,
@@ -144,20 +195,33 @@ export default function CommandPalette({
   agentStates,
   showRecent,
   recents,
+  showFamiliarity,
+  familiarity,
+  onFamiliarityChange,
   onInputChange,
   onSubmit,
   onMicToggle,
   onPickRecent,
 }: CommandPaletteProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (visible) inputRef.current?.focus();
   }, [visible]);
 
+  // Auto-grow: reset to content height (capped), so the row grows with the
+  // question and scrolls past the ceiling. Layout effect so there's no flash
+  // of the wrong height before paint.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, TEXTAREA_MAX_PX)}px`;
+  }, [inputValue, visible]);
+
   const armed = inputValue.trim().length > 0;
   const hints = FOOTER_HINTS[phase] ?? FOOTER_HINTS.active;
-  const showDivider = showAgents || showRecent;
+  const showDivider = showFamiliarity || showAgents || showRecent;
   const inputDisabled = phase === "generating" || phase === "listening";
 
   return (
@@ -176,15 +240,17 @@ export default function CommandPalette({
           >
             <Mic size={20} strokeWidth={1.5} />
           </button>
-          <input
+          <textarea
             ref={inputRef}
             className="palette-input"
             value={inputValue}
+            rows={1}
             onChange={(e) => onInputChange(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && armed) {
+              // Enter (or ⌘/Ctrl+Enter) submits; Shift+Enter inserts a newline.
+              if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                onSubmit();
+                if (armed) onSubmit();
               }
             }}
             placeholder="Speak or type a question…"
@@ -203,6 +269,17 @@ export default function CommandPalette({
         </div>
 
         {showDivider && <div className="palette-divider" />}
+
+        {showFamiliarity && (
+          <FamiliarityToggle
+            value={familiarity}
+            onChange={onFamiliarityChange}
+          />
+        )}
+
+        {showFamiliarity && (showAgents || showRecent) && (
+          <div className="palette-divider" />
+        )}
 
         {showAgents && <AgentActivityRow states={agentStates} />}
 

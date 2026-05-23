@@ -71,7 +71,8 @@ button {
   cursor: pointer;
 }
 
-input {
+input,
+textarea {
   font-family: inherit;
   color: inherit;
   background: transparent;
@@ -79,7 +80,8 @@ input {
   outline: none;
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: var(--fg-subtle);
 }
 
@@ -223,6 +225,122 @@ input::placeholder {
   border-color: var(--border-strong);
 }
 
+.empty-stack {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 760px;
+  padding: 0 24px;
+}
+
+/* ─────────────────────────────────────────────────────────── */
+/*  Landing detail (lede + example-query gallery)              */
+/* ─────────────────────────────────────────────────────────── */
+
+.landing-detail {
+  margin-top: 56px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: fadeInUp 700ms var(--ease-smooth) both;
+  animation-delay: 120ms;
+}
+
+.landing-lede {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  text-align: center;
+  max-width: 460px;
+  margin: 0 0 36px;
+}
+
+.landing-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 40px;
+  width: 100%;
+  text-align: left;
+}
+
+.lg-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lg-field {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.65;
+}
+.lg-queries {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lg-query {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--fg-muted);
+  padding: 7px 10px;
+  margin-left: -10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  transition: color 160ms var(--ease-default),
+    background 160ms var(--ease-default),
+    border-color 160ms var(--ease-default);
+}
+.lg-query:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: var(--border);
+}
+.lg-query-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Mobile: stack as a single column of chips, smaller wordmark gap. */
+@media (max-width: 640px) {
+  .empty-wordmark {
+    font-size: 64px;
+  }
+  .empty-tagline {
+    font-size: 16px;
+    margin-top: 16px;
+  }
+  .empty-hint {
+    margin-top: 40px;
+  }
+  .landing-detail {
+    margin-top: 44px;
+  }
+  .landing-lede {
+    font-size: 14px;
+    margin-bottom: 28px;
+  }
+  .landing-gallery {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .lg-query {
+    font-size: 14px;
+  }
+}
+
 .kbd {
   display: inline-flex;
   align-items: center;
@@ -295,13 +413,13 @@ input::placeholder {
   overflow: hidden;
 }
 
-/* Input row */
+/* Input row — grows with the multiline textarea; min matches the old 60px. */
 .palette-input-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
-  height: 60px;
-  padding: 0 20px;
+  min-height: 60px;
+  padding: 14px 20px;
 }
 
 .mic-btn {
@@ -350,15 +468,36 @@ input::placeholder {
   }
 }
 
+/* Auto-growing multiline textarea. Resizing is JS-driven (scrollHeight up to a
+   cap); we keep it borderless and resize:none so it reads as a plain input. */
 .palette-input {
   flex: 1;
-  height: 100%;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: 16px;
   font-weight: 400;
+  line-height: 1.5;
   color: var(--fg);
   caret-color: var(--accent);
   letter-spacing: 0;
+  resize: none;
+  overflow-y: auto;
+  /* Center the single-line state against the 28px mic / 26px submit controls. */
+  padding: 2px 0;
+  max-height: 132px;
+  display: block;
+}
+.palette-input::-webkit-scrollbar {
+  width: 6px;
+}
+.palette-input::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+/* Keep mic + submit pinned to the first line as the textarea grows. */
+.palette-input-row .mic-btn,
+.palette-input-row .submit-cue {
+  margin-top: 2px;
 }
 
 .submit-cue {
@@ -449,6 +588,48 @@ input::placeholder {
 }
 .agent.done .agent-label {
   color: var(--fg-subtle);
+}
+
+/* Familiarity (explanation-level) segmented toggle */
+.familiarity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 20px;
+}
+.fam-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  flex-shrink: 0;
+}
+.fam-seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+}
+.fam-opt {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--fg-subtle);
+  padding: 5px 12px;
+  border-radius: 6px;
+  transition: color 180ms var(--ease-default),
+    background 180ms var(--ease-default), box-shadow 180ms var(--ease-default);
+}
+.fam-opt:hover {
+  color: var(--fg-muted);
+}
+.fam-opt.active {
+  color: var(--bg);
+  background: var(--accent);
+  box-shadow: 0 0 12px 0 var(--accent-glow);
 }
 
 /* Recent */
@@ -623,6 +804,56 @@ input::placeholder {
   border-color: var(--border-strong);
   transform: scale(1.05);
   background: var(--glass-strong);
+}
+
+/* ─────────────────────────────────────────────────────────── */
+/*  Ended rest-state hint (quiet affordance line, lower-center) */
+/* ─────────────────────────────────────────────────────────── */
+
+.ended-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 7vh;
+  transform: translate(-50%, 8px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 40;
+  transition: opacity 400ms var(--ease-smooth),
+    transform 400ms var(--ease-smooth);
+}
+.ended-hint.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  /* 600ms in so it follows the caption fade, not races it. */
+  transition-delay: 500ms;
+}
+.ended-hint .eh-text {
+  margin-left: 2px;
+}
+.ended-hint .eh-sep {
+  opacity: 0.4;
+  margin: 0 4px;
+}
+@media (max-width: 640px) {
+  .ended-hint {
+    font-size: 11px;
+    bottom: 5vh;
+    gap: 6px;
+    padding: 8px 12px;
+  }
 }
 
 /* ─────────────────────────────────────────────────────────── */

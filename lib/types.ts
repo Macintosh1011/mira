@@ -11,6 +11,14 @@ export type Renderer = "2d" | "3d";
 
 export type GenerateMode = "new" | "mutate";
 
+/**
+ * How much the viewer already knows about the topic. Tunes BOTH what the
+ * orchestrator plans (phase count, label technicality, value precision) and how
+ * the narration speaks (vocabulary, depth, whether terms get defined). Absent is
+ * treated as "familiar" — the default register.
+ */
+export type Familiarity = "novice" | "familiar" | "expert";
+
 export interface ScenePhase {
   id: string;
   /** What this phase is meant to show, in one line. */
@@ -229,6 +237,8 @@ export interface GenerateRequest {
   mode: GenerateMode;
   /** Required when mode === "mutate": the scene being morphed. */
   previousSceneId?: string;
+  /** Viewer's prior knowledge; tunes plan + narration. Defaults to "familiar". */
+  familiarity?: Familiarity;
 }
 
 /**
