@@ -152,8 +152,11 @@ function buildNoise3D(): (x: number, y: number, z: number) => number {
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
 // The 800ms mount fade lives in CSS (.noise-field transition in globals.css).
-// prophet's SIZE / segment / noise constants are reproduced verbatim below.
-const SIZE = 48;
+// prophet's square 48-unit plane read as a centered mound in our wide, short
+// band, so the plane is widened in X to overshoot the viewport edges and fill
+// the full screen width as a continuous ridge line. Depth + noise are prophet's.
+const PLANE_W = 150; // X span — wider than the FOV so the terrain bleeds edge-to-edge
+const PLANE_D = 48; // Z span (depth receding into the fog), prophet's value
 
 export default function NoiseField() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -202,8 +205,11 @@ export default function NoiseField() {
       canvas.style.display = "block";
       container.appendChild(canvas);
 
-      const segments = isMobile ? 64 : 96;
-      const geometry = new THREE.PlaneGeometry(SIZE, SIZE, segments, segments);
+      // More segments along the wide X axis to keep roughly square wireframe
+      // cells across the full width.
+      const segX = isMobile ? 120 : 180;
+      const segZ = isMobile ? 40 : 56;
+      const geometry = new THREE.PlaneGeometry(PLANE_W, PLANE_D, segX, segZ);
       geometry.rotateX(-Math.PI / 2);
 
       const material = new THREE.LineBasicMaterial({
