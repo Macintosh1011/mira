@@ -107,8 +107,10 @@ export class Narrator {
   // stale scene can't speak over (or advance) the current one.
   private generation = 0;
 
-  // How long playCue will wait on an in-flight prefetch before falling back.
-  private static readonly PREFETCH_WAIT_MS = 4000;
+  // How long playCue will wait on an in-flight prefetch before robot-falling-back.
+  // Generous because the FIRST /api/tts call pays a cold serverless start +
+  // ElevenLabs generation; a slow-but-arriving clip must not be cut to the robot.
+  private static readonly PREFETCH_WAIT_MS = 12000;
 
   constructor() {
     if (hasSpeechSynthesis()) {
@@ -398,23 +400,33 @@ export class Narrator {
     text: string,
     signal: AbortSignal,
   ): Promise<string | null> {
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal,
-      });
-      if (!res.ok) return null; // -> SpeechSynthesis fallback at cue time
-      const blob = await res.blob();
+    // Retry once on a failed request: the first call after an idle period hits
+    // a cold /api/tts function and can transiently 5xx; a warm retry succeeds,
+    // so the opening cue isn't dropped to the robot voice.
+    for (let attempt = 0; attempt < 2; attempt++) {
       if (signal.aborted) return null;
-      const url = URL.createObjectURL(blob);
-      this.audioUrls.set(index, url);
-      return url;
-    } catch {
-      // aborted or network error -> SpeechSynthesis fallback at cue time
-      return null;
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal,
+        });
+        if (res.ok) {
+          const blob = await res.blob();
+          if (signal.aborted) return null;
+          const url = URL.createObjectURL(blob);
+          this.audioUrls.set(index, url);
+          return url;
+        }
+        // non-ok (e.g. cold-start 5xx) -> brief pause, then one retry
+      } catch {
+        if (signal.aborted) return null;
+        // network error -> retry once
+      }
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 500));
     }
+    return null; // genuinely failed -> SpeechSynthesis fallback at cue time
   }
 
   private cancelPrefetch() {
