@@ -33,14 +33,10 @@ export interface ActiveScene {
   kind: SceneKind;
   /** State-badge topic label. */
   label: string;
-  /** Phase-indicator labels. */
+  /** Phase-indicator labels (one per cue). */
   phaseLabels: string[];
-  /** Phase reveal boundaries, ms from playback start. */
-  phaseTimes: number[];
-  /** Caption + TTS cues, ms from playback start. */
+  /** Caption + TTS cues. Cue i drives caption i and canvas phase i, in order. */
   cues: NarrationCue[];
-  /** Total ms before the scene fades back to empty. */
-  duration: number;
   /** Topic SVG canvas component name, when kind === "topic". */
   canvas?: Topic["canvas"];
   /** Generated code body, when kind === "live". */
@@ -72,7 +68,9 @@ export interface MiraSession {
   openFollowUp: () => void;
 }
 
-const CAPTION_TAIL_MS = 5000;
+// How long the final caption + canvas linger after the last cue's audio ends,
+// before the scene fades back to empty.
+const SCENE_END_TAIL_MS = 1500;
 
 /** SSE event -> which of the 4 agent dots [plan, gen, voice, check]. */
 function agentsForEvent(
@@ -115,13 +113,11 @@ function topicToScene(topic: Topic, renderRev: number): ActiveScene {
     kind: "topic",
     label: topic.label,
     phaseLabels: topic.phaseLabels,
-    phaseTimes: topic.phases.map((p) => p.t),
     cues: topic.captions.map((c, i) => ({
       phaseId: `cap-${i}`,
       text: c.text,
       startMs: c.t,
     })),
-    duration: topic.duration,
     canvas: topic.canvas,
     renderRev,
   };
@@ -155,10 +151,15 @@ export function useMiraSession(): MiraSession {
     cues: NarrationCue[];
   } | null>(null);
 
-  // Lazily construct the Narrator on the client.
+  // Lazily construct the Narrator on the client. Each cue activation drives the
+  // caption AND the canvas phase in lockstep — onCue(i) means cue i is speaking,
+  // caption i is on screen, and the canvas is in phase i.
   useEffect(() => {
     const n = new Narrator();
-    n.setOnCue((i) => setCaptionIdx(i));
+    n.setOnCue((i) => {
+      setCaptionIdx(i);
+      setCanvasPhase(i);
+    });
     narratorRef.current = n;
     return () => n.dispose();
   }, []);
@@ -197,20 +198,27 @@ export function useMiraSession(): MiraSession {
 
   const startPlaying = useCallback((next: ActiveScene) => {
     const n = narratorRef.current;
-    // Dismiss the palette (200ms fade) then mount the canvas + start the clock.
+    // Dismiss the palette (200ms fade) then mount the canvas + start narration.
     setDismissing(true);
     setPhase("playing");
     window.setTimeout(() => {
       setPaletteVisible(false);
       setDismissing(false);
       setScene(next);
-      setCanvasPhase(0);
-      setCaptionIdx(0);
-      if (n) {
-        n.reset();
-        n.setCues(next.cues);
-        n.start();
-      }
+      if (!n) return;
+      // Scene end: after the last cue's audio ends, hold a short tail, then
+      // fade back to empty. onCue drives caption + phase the whole way here.
+      n.setOnComplete(() => {
+        setCaptionIdx(-1);
+        window.setTimeout(() => {
+          setPhase((p) => (p === "playing" ? "empty" : p));
+          setScene((s) => (s === next ? null : s));
+          setCanvasPhase(-1);
+        }, SCENE_END_TAIL_MS);
+      });
+      n.reset();
+      n.setCues(next.cues);
+      n.start(); // synchronously fires onCue(0) -> caption 0 + phase 0
     }, 200);
   }, []);
 
@@ -249,20 +257,13 @@ export function useMiraSession(): MiraSession {
               const cues = [...live.cues].sort(
                 (a, b) => a.startMs - b.startMs,
               );
-              const lastStart = cues.length
-                ? cues[cues.length - 1].startMs
-                : 0;
-              // One canvas phase per narration cue boundary.
-              const phaseTimes = cues.map((c) => c.startMs);
+              // One canvas phase per narration cue, advanced in lockstep by the
+              // Narrator's onCue.
               startPlaying({
                 kind: "live",
                 label: query.slice(0, 40),
-                phaseLabels: cues.map(
-                  (_, i) => `phase ${i + 1}`,
-                ),
-                phaseTimes: phaseTimes.length ? phaseTimes : [0],
+                phaseLabels: cues.map((_, i) => `phase ${i + 1}`),
                 cues,
-                duration: lastStart + CAPTION_TAIL_MS,
                 code: live.code,
                 renderer: live.renderer,
                 renderRev: renderRevRef.current,
@@ -363,42 +364,9 @@ export function useMiraSession(): MiraSession {
 
   const setInput = useCallback((value: string) => setInputState(value), []);
 
-  // ── Playback engine: 80ms tick reads the Narrator clock ──────────────
-  useEffect(() => {
-    if (phase !== "playing" || !scene) return;
-    const n = narratorRef.current;
-    if (!n) return;
-
-    let ended = false;
-    let endTimer: number | undefined;
-
-    const tick = () => {
-      const elapsed = n.elapsedMs;
-
-      let cp = -1;
-      for (let i = 0; i < scene.phaseTimes.length; i++) {
-        if (elapsed >= scene.phaseTimes[i]) cp = i;
-      }
-      setCanvasPhase((prev) => (prev === cp ? prev : cp));
-
-      if (elapsed > scene.duration && !ended) {
-        ended = true;
-        setCaptionIdx(-1);
-        window.clearInterval(id);
-        endTimer = window.setTimeout(() => {
-          setPhase((p) => (p === "playing" ? "empty" : p));
-          setScene((s) => (s === scene ? null : s));
-          setCanvasPhase(-1);
-        }, 1500);
-      }
-    };
-    const id = window.setInterval(tick, 80);
-    tick();
-    return () => {
-      window.clearInterval(id);
-      if (endTimer !== undefined) window.clearTimeout(endTimer);
-    };
-  }, [phase, scene]);
+  // Caption + canvas phase are driven entirely by the Narrator's onCue (cue i ->
+  // captionIdx i + canvasPhase i) and scene end by its onComplete. There is no
+  // separate clock tick: the spoken audio is the single timeline.
 
   return {
     phase,

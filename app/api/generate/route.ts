@@ -36,7 +36,7 @@ import {
   narrationFromPlan,
 } from "@/lib/agents/narration";
 import { verifyScene } from "@/lib/agents/verifier";
-import { genericSceneCode } from "@/lib/agents/generic-scene";
+import { archetypeSceneCode } from "@/lib/agents/archetypes";
 import { getScene, putScene } from "@/lib/agents/scene-store";
 import {
   matchBundle,
@@ -50,13 +50,14 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * Live-generation budgets. The code budget is generous so a typical novel query
- * actually finishes a real kit-composed scene; the deterministic generic scene
- * is the safety net if it still doesn't. maxDuration (60s) leaves headroom for
- * narration + verify after this.
+ * Live-generation budgets. The DEFAULT scene is now a deterministic, hand-tuned
+ * ARCHETYPE filled with the plan's structured content — no flaky model codegen
+ * in the hot path. Freeform codegen is only a last resort if an archetype ever
+ * fails its runnable check, so its budget is tight. maxDuration (60s) leaves
+ * headroom for narration + verify.
  */
 const PLAN_BUDGET_MS = 12_000;
-const CODE_BUDGET_MS = 30_000;
+const CODE_BUDGET_MS = 20_000;
 /**
  * Hard ceiling on waiting for the (best-effort) managed-agent verifier before
  * `done`. The Antigravity sandbox can take 10s+ on a cold start, so this cap
@@ -81,6 +82,8 @@ function minimalPlan(query: string): ScenePlan {
   return {
     id: `scene-${Date.now().toString(36)}`,
     title: title || "Mira",
+    sceneType: "flow",
+    content: [{ label: title || query || "Mira" }],
     phases: [
       { id: "overview", intent: query || title, renderer: "2d", approxDurationMs: 5000 },
     ],
@@ -88,17 +91,18 @@ function minimalPlan(query: string): ScenePlan {
 }
 
 /**
- * Stream the deterministic, ON-TOPIC generic scene for a real plan, with the
- * real narration cues. The render stage is never blank and never off-topic.
+ * Stream the hand-tuned ARCHETYPE scene for a real plan, with the real narration
+ * cues. This is the default for novel queries: deterministic, on-topic, and
+ * reference-quality. The render stage is never blank and never off-topic.
  */
-function streamGenericFallback(
+function streamArchetypeScene(
   controller: ReadableStreamDefaultController<Uint8Array>,
   plan: ScenePlan,
   narration: NarrationCue[],
 ): void {
   const renderer: Renderer = planRenderer(plan);
   const sceneId = plan.id;
-  const code = genericSceneCode(plan);
+  const code = archetypeSceneCode(plan);
   controller.enqueue(sse({ type: "plan", plan }));
   controller.enqueue(sse({ type: "code_chunk", sceneId, delta: code }));
   controller.enqueue(sse({ type: "code_done", sceneId, code, renderer }));
@@ -163,12 +167,12 @@ async function runGeneration(
     return;
   }
 
-  // No key at all: there's no live generation to attempt. Still stay ON-TOPIC by
-  // building a minimal plan from the query and rendering the generic scene plus
-  // narration derived deterministically from the plan.
+  // No key at all: there's no live planning to attempt. Still stay ON-TOPIC by
+  // building a minimal plan from the query and rendering the archetype scene
+  // plus narration derived deterministically from the plan.
   if (!hasGeminiKey()) {
     const plan = minimalPlan(query);
-    streamGenericFallback(controller, plan, narrationFromPlan(plan));
+    streamArchetypeScene(controller, plan, narrationFromPlan(plan));
     return;
   }
 
@@ -177,8 +181,9 @@ async function runGeneration(
       ? getScene(req.previousSceneId)
       : undefined;
 
-  // 1) PLAN (structured). On failure we still keep the user on-topic with a
-  // minimal plan + generic scene rather than a wrong cached topic.
+  // 1) PLAN (structured): title + sceneType (archetype) + per-phase content.
+  // On failure we keep the user on-topic with a minimal plan + archetype scene
+  // rather than a wrong cached topic.
   let plan;
   try {
     plan = await withDeadline(PLAN_BUDGET_MS, (signal) =>
@@ -190,12 +195,12 @@ async function runGeneration(
     );
   } catch {
     const fallback = minimalPlan(query);
-    streamGenericFallback(controller, fallback, narrationFromPlan(fallback));
+    streamArchetypeScene(controller, fallback, narrationFromPlan(fallback));
     return;
   }
   if (!plan.phases.length) {
     const fallback = minimalPlan(query);
-    streamGenericFallback(controller, fallback, narrationFromPlan(fallback));
+    streamArchetypeScene(controller, fallback, narrationFromPlan(fallback));
     return;
   }
   controller.enqueue(sse({ type: "plan", plan }));
@@ -203,9 +208,9 @@ async function runGeneration(
   const renderer: Renderer = planRenderer(plan);
   const sceneId = plan.id;
 
-  // 2) NARRATION (structured, deterministic timeline) — generated up front from
-  // the REAL plan so the user always hears on-topic narration even when the
-  // scene code falls back. On failure, derive cues from the plan intents.
+  // 2) NARRATION (structured, deterministic timeline) — generated from the REAL
+  // plan so cues stay 1:1 with phases (phase N == spoken cue N). On failure,
+  // derive cues from the plan intents.
   let narration: NarrationCue[];
   try {
     narration = await withDeadline(PLAN_BUDGET_MS, (signal) =>
@@ -215,30 +220,28 @@ async function runGeneration(
     narration = narrationFromPlan(plan);
   }
 
-  // 3) CODE (streamed). Stream deltas live. On deadline/error/garbage we keep
-  // the real plan + real narration and swap ONLY the scene code for the
-  // deterministic, on-topic generic scene.
-  let code = "";
-  let codeOk = false;
-  try {
-    const result = await withDeadline(CODE_BUDGET_MS, (signal) =>
-      generateCode({
-        plan,
-        abortSignal: signal,
-        previousCode: prior?.code,
-        onDelta: (delta) => {
-          controller.enqueue(sse({ type: "code_chunk", sceneId, delta }));
-        },
-      }),
-    );
-    code = result.code;
-    codeOk = looksRunnable(code);
-  } catch {
-    codeOk = false;
-  }
-
-  if (!codeOk) {
-    code = genericSceneCode(plan);
+  // 3) SCENE — DEFAULT path: the hand-tuned archetype selected by plan.sceneType,
+  // filled with the plan's structured content. Deterministic and reference-grade,
+  // so it always passes looksRunnable. Freeform model codegen is only a LAST
+  // RESORT if the archetype ever yields non-runnable output (defensive).
+  let code = archetypeSceneCode(plan);
+  controller.enqueue(sse({ type: "code_chunk", sceneId, delta: code }));
+  if (!looksRunnable(code)) {
+    try {
+      const result = await withDeadline(CODE_BUDGET_MS, (signal) =>
+        generateCode({
+          plan,
+          abortSignal: signal,
+          previousCode: prior?.code,
+          onDelta: (delta) => {
+            controller.enqueue(sse({ type: "code_chunk", sceneId, delta }));
+          },
+        }),
+      );
+      if (looksRunnable(result.code)) code = result.code;
+    } catch {
+      /* keep the archetype code (already on-topic) */
+    }
   }
 
   controller.enqueue(sse({ type: "code_done", sceneId, code, renderer }));
@@ -307,14 +310,14 @@ export async function POST(request: Request): Promise<Response> {
       try {
         await runGeneration(controller, req);
       } catch (err) {
-        // Last-resort guard: emit an error then the ON-TOPIC generic scene over
+        // Last-resort guard: emit an error then the ON-TOPIC archetype scene over
         // a minimal plan so the stage is never blank and never off-topic.
         const message =
           err instanceof Error ? err.message : "generation failed";
         try {
           controller.enqueue(sse({ type: "error", message }));
           const fallback = minimalPlan(req.query);
-          streamGenericFallback(
+          streamArchetypeScene(
             controller,
             fallback,
             narrationFromPlan(fallback),

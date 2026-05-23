@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { RenderLibs, RenderModule } from "@/lib/types";
+import type { RenderLibs, RenderModule, SceneController } from "@/lib/types";
 import { loadRenderLibs } from "./libs";
-import { compileSceneCode } from "./compile";
+import { compileSceneCode, mountModule } from "./compile";
 import { fallbackModule } from "./fallback";
 
 export type RenderStatus = "loading" | "live" | "fallback";
@@ -15,13 +15,21 @@ interface RenderHostProps {
   remountKey?: number;
   /** When false, the scene is torn down (paused) and the surface is frozen. */
   playing: boolean;
+  /**
+   * External, narration-driven phase index. The mounted scene reveals
+   * cumulatively up to this beat. Phase BOUNDARIES come from here (voice sync);
+   * the scene only eases WITHIN a beat off its own rAF. Changing `phase` does
+   * NOT remount — it calls the controller's setPhase so easing stays smooth.
+   */
+  phase?: number;
   onStatusChange?: (status: RenderStatus) => void;
 }
 
 /**
  * Owns the live render surface. Loads p5/three/gsap client-side, compiles the
- * generated code, and mounts it into a container. Any compile OR runtime throw
- * falls back to a hand-written p5 sketch so the stage is never blank.
+ * generated code, mounts it into a container, and drives its phase from the
+ * external `phase` prop. Any compile OR runtime throw falls back to a
+ * hand-written p5 sketch so the stage is never blank.
  *
  * Pausing tears the scene down (animations are self-driven via rAF inside the
  * mounted module; there's no shared clock to freeze), and resuming remounts it.
@@ -30,10 +38,16 @@ export default function RenderHost({
   code,
   remountKey = 0,
   playing,
+  phase = 0,
   onStatusChange,
 }: RenderHostProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const libsRef = useRef<RenderLibs | null>(null);
+  const controllerRef = useRef<SceneController | null>(null);
+  // Latest phase, read at mount time so a scene mounting mid-playback lands on
+  // the correct beat immediately (not always phase 0). Kept in sync by the
+  // phase-driven effect below (never written during render).
+  const phaseRef = useRef(phase);
   const [libsReady, setLibsReady] = useState(false);
 
   useEffect(() => {
@@ -48,6 +62,8 @@ export default function RenderHost({
     };
   }, []);
 
+  // Mount / teardown. Deliberately does NOT depend on `phase` — a phase change
+  // must not remount the scene (that would restart its rAF and kill the ease).
   useEffect(() => {
     const container = containerRef.current;
     const libs = libsRef.current;
@@ -60,19 +76,25 @@ export default function RenderHost({
     }
 
     container.innerHTML = "";
-    let cleanup: (() => void) | null = null;
 
     const mount = (module: RenderModule, status: RenderStatus) => {
       try {
-        cleanup = module(container, libs);
+        const controller = mountModule(module, container, libs);
+        controllerRef.current = controller;
+        // Land on the current beat at mount (scene may mount mid-playback).
+        try {
+          controller.setPhase(Math.max(0, phaseRef.current));
+        } catch {
+          /* setPhase of a broken module — ignore */
+        }
         onStatusChange?.(status);
       } catch {
         // Runtime throw from generated code → wipe and run the safe sketch.
         container.innerHTML = "";
         try {
-          cleanup = fallbackModule(container, libs);
+          controllerRef.current = mountModule(fallbackModule, container, libs);
         } catch {
-          cleanup = null;
+          controllerRef.current = null;
         }
         onStatusChange?.("fallback");
       }
@@ -92,13 +114,25 @@ export default function RenderHost({
 
     return () => {
       try {
-        cleanup?.();
+        controllerRef.current?.dispose();
       } catch {
-        /* cleanup of broken module — ignore */
+        /* dispose of broken module — ignore */
       }
+      controllerRef.current = null;
       if (container) container.innerHTML = "";
     };
   }, [code, remountKey, playing, libsReady, onStatusChange]);
+
+  // Drive the external phase into the live scene without remounting. Also keep
+  // phaseRef current so a (re)mount lands on the right beat immediately.
+  useEffect(() => {
+    phaseRef.current = phase;
+    try {
+      controllerRef.current?.setPhase(Math.max(0, phase));
+    } catch {
+      /* setPhase of a broken module — ignore */
+    }
+  }, [phase]);
 
   return (
     <div

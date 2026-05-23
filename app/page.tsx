@@ -163,6 +163,7 @@ export default function Page() {
                 code={scene.code ?? null}
                 remountKey={scene.renderRev}
                 playing={phase !== "paused"}
+                phase={canvasPhase}
               />
               <PhaseIndicator
                 phase={canvasPhase}

@@ -252,6 +252,61 @@ export interface PixelGridOpts {
   frame?: boolean;
 }
 
+export interface ArrowEdgeOpts {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  /** Clock in seconds for the flowing dash. */
+  t: number;
+  color?: RGB;
+  /** Overall edge opacity 0..1 (reveal). Defaults to 1. */
+  reveal?: number;
+  /** Draw a directional arrowhead at the (x2,y2) end. Defaults true. */
+  head?: boolean;
+  /** Curve the edge: perpendicular bow height in px (0 = straight). */
+  curve?: number;
+}
+
+export interface StageNodeOpts {
+  x: number;
+  y: number;
+  /** Pill radius in px. Defaults 46. */
+  r?: number;
+  /** Big label inside the pill. */
+  label: string;
+  /** Uppercase mono sub-label above the label. */
+  sublabel?: string;
+  /** Short value/readout below the label. */
+  value?: string;
+  color?: RGB;
+  /** Reveal 0..1 (scale + opacity). */
+  reveal?: number;
+  /** Active glow 0..1 — the "current beat" highlight. */
+  active?: number;
+  /** Optional ordinal badge (1-based) drawn at the pill's top edge. */
+  index?: number;
+}
+
+export interface BarOpts {
+  x: number;
+  /** Baseline y (bottom of the bar). */
+  y: number;
+  w: number;
+  /** Full height at value=1, in px. */
+  maxH: number;
+  /** 0..1 fill fraction. */
+  value: number;
+  label?: string;
+  /** Short value readout drawn above the bar (e.g. "72%"). */
+  readout?: string;
+  color?: RGB;
+  /** Grow-in progress 0..1. */
+  reveal?: number;
+  /** Active highlight 0..1. */
+  active?: number;
+}
+
 export interface PhaseDotsOpts {
   x: number;
   y: number;
@@ -346,6 +401,14 @@ export interface Kit {
   flowEdge: (p: P5, opts: FlowEdgeOpts) => void;
   signal: (p: P5, opts: SignalOpts) => void;
   gauge: (p: P5, opts: GaugeOpts) => void;
+
+  // ── archetype vocabulary (cycle / timeline / comparison) ──────────
+  /** Directed edge with an arrowhead + flowing dash; optionally curved. */
+  arrowEdge: (p: P5, opts: ArrowEdgeOpts) => void;
+  /** Compact stage pill for cycle/timeline beats (lighter than `node`). */
+  stageNode: (p: P5, opts: StageNodeOpts) => void;
+  /** A single vertical bar for the comparison archetype. */
+  bar: (p: P5, opts: BarOpts) => void;
 
   // ── network vocabulary (NN topic) ─────────────────────────────────
   neuron: (p: P5, opts: NeuronOpts) => void;

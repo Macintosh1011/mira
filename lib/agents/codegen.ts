@@ -1,20 +1,19 @@
 /**
  * Code-gen agent: ScenePlan -> a single render-module body string.
  *
- * STRATEGY: the model is a COMPOSITOR, not a painter. It does NOT draw beautiful
- * animation from scratch (unreliable). Instead it arranges a hand-built library
- * of high-quality primitives (lib/kit) injected as `libs.kit`. The reference
- * aesthetic lives in the kit; the model's job is layout, timeline, and which
- * primitives to call. The system prompt below hands it the full kit API surface
- * plus two gold-standard example bodies that reach reference quality, and tells
- * it to generate "in exactly this style".
+ * LAST RESORT. The DEFAULT path for novel queries is the hand-tuned archetypes
+ * (lib/agents/archetypes.ts) — deterministic and reference-quality. This agent
+ * only runs if the archetype scene somehow fails its runnable check. It is still
+ * a COMPOSITOR: it arranges the kit's primitives (libs.kit), not freehand paint.
  *
- * The output is the BODY of `(container, libs) => () => void` (see RenderModule
- * in lib/types.ts). The render host does `new Function("container","libs",code)`
- * and calls the returned cleanup on unmount. So the string MUST:
+ * The output is the BODY of `(container, libs) => SceneController` (see
+ * RenderModule in lib/types.ts). The render host does
+ * `new Function("container","libs",code)`, calls `setPhase(phaseIndex)` when the
+ * external (narration-driven) phase changes, and calls `dispose()` on unmount.
+ * So the string MUST:
  *   - use only `container` and `libs` ({ p5, THREE, gsap, kit }) as inputs,
  *   - mount into `container`,
- *   - return a cleanup function,
+ *   - keep a `phase` variable and return `{ setPhase, dispose }`,
  *   - contain NO import/export/markdown fences (libs are injected).
  *
  * We stream raw deltas to the UI (code_chunk events) while accumulating, then
@@ -28,10 +27,11 @@ import { FED_RATE_CUT_BODY, NN_CLASSIFIER_BODY, ORBIT_3D_BODY } from "@/lib/kit/
 
 const CONTRACT = `OUTPUT CONTRACT (non-negotiable):
 You output the BODY of a JavaScript function with this exact signature:
-    (container, libs) => () => void
+    (container, libs) => { setPhase(phaseIndex), dispose() }
 - \`container\` is an HTMLElement you mount into. Read container.clientWidth / clientHeight; default to 1280x720 if zero.
 - \`libs\` is { p5, THREE, gsap, kit }. They are already loaded; do NOT import or require anything.
-- Your code MUST end with \`return <cleanupFn>;\` that fully tears down: remove the canvas/renderer DOM node, cancel any requestAnimationFrame loop, kill gsap tweens, dispose three.js geometry/materials.
+- Keep a \`let phase = 0;\` that an EXTERNAL caller advances; your draw loop reveals elements CUMULATIVELY up to \`phase\` (phase 0 visible; phase 1 adds the next; …). Do NOT advance phase off your own clock — only ease WITHIN the current phase.
+- Your code MUST end with \`return { setPhase: (n) => { phase = n; }, dispose: () => { ...teardown... } };\`. dispose() fully tears down: remove the canvas/renderer DOM node, cancel any requestAnimationFrame loop, kill gsap tweens, dispose three.js geometry/materials.
 - Output RAW JavaScript only. No markdown fences. No import/export/require. No surrounding function wrapper, no \`function mount(...)\` — just the statements that go INSIDE the body. The host wraps it.
 - Do not touch window/document beyond what you create inside container (you may use requestAnimationFrame, cancelAnimationFrame, setTimeout, Math, performance, window.devicePixelRatio, window resize listeners that you remove in cleanup).`;
 
@@ -72,6 +72,9 @@ const KIT_API = `KIT API (libs.kit) — PREFER these primitives; every drawing c
   flowEdge(p, { x1, y1, x2, y2, t, color=accent, reveal=1, active=true })  // faint base line + flowing accent dash; t = seconds clock
   signal(p, { x1, y1, x2, y2, t, color=accent, reveal=1 })                 // brighter/faster dashed pulse along a path
   gauge(p, { x, y, from:number, to:number, t, label?, unit?, color?, decimals? })  // labeled numeric readout that flips
+  arrowEdge(p, { x1, y1, x2, y2, t, color?, reveal=1, head=true, curve=0 }) // directed edge: arrowhead + flowing dash, optional bow (curve px)
+  stageNode(p, { x, y, r=46, label, sublabel?, value?, color?, reveal=1, active=0, index? })  // compact stage pill (cycle/timeline beat)
+  bar(p, { x, y, w, maxH, value:0..1, label?, readout?, color?, reveal=1, active=0 })          // a vertical comparison bar
 
   // network vocabulary (the NN topic)
   neuron(p, { x, y, r=11, active?, settled?, winner?, label?, color=accent, reveal=1 })  // active/winner glow, settled=muted gray
@@ -89,7 +92,7 @@ const KIT_API = `KIT API (libs.kit) — PREFER these primitives; every drawing c
   flatSphere(THREE, r, rgb, wire=false) -> Mesh    // Lambert flatShading, or wireframe
   flatLine(THREE, pts:number[][], rgb) -> Line`;
 
-const TIMELINE_GUIDE = `TIMELINE: write ALL phases into ONE module on a single self-driven clock (use p.millis() inside the p5 sketch, or performance.now() for 3D). Compute a phase index from elapsed time and a per-phase \`local\` progress 0..1 eased with kit.ease.outCubic. Reveal CUMULATIVELY: once a beat appears it stays; later beats reveal on top. Pass that progress as \`reveal\` / \`settle\` / \`t\` into kit primitives — do NOT invent your own tween system. Use a seconds clock (p.millis()/1000) for flowEdge/signal dash flow. Design the layout in a 1600x900 space and scale-to-fit the container (see examples), so coordinates stay readable.`;
+const TIMELINE_GUIDE = `TIMELINE (PHASE-DRIVEN): keep a \`let phase = 0;\` advanced ONLY by the returned setPhase — never off your own clock. Track when the phase last changed (e.g. \`let phaseStart = null;\` set to p.millis() on change) and derive a per-phase \`local\` progress 0..1 eased with kit.ease.outCubic for the CURRENT beat's ease-in. Reveal CUMULATIVELY: draw every element with index <= phase; the current one eases in (reveal = phase===i ? local : 1). The examples below use a self-driven clock for illustration — you must instead read the external \`phase\`. Pass progress as \`reveal\` / \`settle\` / \`t\` into kit primitives; do NOT invent your own tween system. Use a seconds clock (p.millis()/1000) for flowEdge/signal dash flow. Design the layout in a 1600x900 space and scale-to-fit the container (see examples), so coordinates stay readable. End with \`return { setPhase: (n) => { phase = n; phaseStart = p.millis(); }, dispose: () => inst.remove() };\`.`;
 
 function systemFor(renderer: Renderer): string {
   if (renderer === "3d") {

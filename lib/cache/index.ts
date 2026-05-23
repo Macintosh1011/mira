@@ -155,6 +155,10 @@ export function planFromBundle(bundle: SceneBundle, query: string): ScenePlan {
   return {
     id: bundle.sceneId,
     title: query.slice(0, 48) || bundle.sceneId,
+    // Hand-authored bundles carry their own self-contained scene code (not an
+    // archetype), so sceneType is only nominal here; "flow" is the safe default.
+    sceneType: "flow",
+    content: bundle.narration.map((cue) => ({ label: cue.text })),
     phases,
   };
 }

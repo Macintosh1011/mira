@@ -557,6 +557,329 @@ function gauge(
   });
 }
 
+// ── archetype primitives (cycle / timeline / comparison) ────────────────
+// Directed edge: optional quadratic bow, flowing dash, and an arrowhead at the
+// end. Built on the same dash-flow renderer so it matches flowEdge's feel.
+function arrowEdge(
+  p: P5,
+  opts: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    t: number;
+    color?: RGB;
+    reveal?: number;
+    head?: boolean;
+    curve?: number;
+  },
+): void {
+  const color = opts.color ?? PALETTE.accent;
+  const reveal = EASE.outCubic(opts.reveal ?? 1);
+  if (reveal <= 0.01) return;
+  const head = opts.head ?? true;
+  const curve = opts.curve ?? 0;
+
+  const dx = opts.x2 - opts.x1;
+  const dy = opts.y2 - opts.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  // Unit normal for the bow control point.
+  const nx = -dy / len;
+  const ny = dx / len;
+  const mx = (opts.x1 + opts.x2) / 2 + nx * curve;
+  const my = (opts.y1 + opts.y2) / 2 + ny * curve;
+
+  // Tangent at the end (for arrowhead orientation): derivative of the
+  // quadratic Bézier at t=1 points from the control point to the end.
+  const tangentX = curve === 0 ? dx / len : opts.x2 - mx;
+  const tangentY = curve === 0 ? dy / len : opts.y2 - my;
+  const tlen = Math.hypot(tangentX, tangentY) || 1;
+  const ux = tangentX / tlen;
+  const uy = tangentY / tlen;
+
+  // Pull the visible end back so the line tucks under the arrowhead.
+  const headSize = 9;
+  const ex = head ? opts.x2 - ux * headSize : opts.x2;
+  const ey = head ? opts.y2 - uy * headSize : opts.y2;
+
+  p.push();
+  // Base line — white 0.10, curved if requested.
+  p.noFill();
+  p.stroke(255, 255, 255, 0.1 * 255 * reveal);
+  p.strokeWeight(1);
+  if (curve === 0) {
+    p.line(opts.x1, opts.y1, ex, ey);
+  } else {
+    p.beginShape();
+    p.vertex(opts.x1, opts.y1);
+    p.quadraticVertex(mx, my, ex, ey);
+    p.endShape();
+  }
+
+  // Flowing accent dash along the (approximated) path.
+  if (curve === 0) {
+    drawFlowingDash(p, opts.x1, opts.y1, ex, ey, opts.t, color, 0.55 * reveal, 2.4, 4);
+  } else {
+    // Sample the curve into short segments and flow the dash per segment.
+    const segs = 24;
+    let px = opts.x1;
+    let py = opts.y1;
+    let acc = 0;
+    for (let i = 1; i <= segs; i++) {
+      const s = i / segs;
+      const bx = lerp(lerp(opts.x1, mx, s), lerp(mx, ex, s), s);
+      const by = lerp(lerp(opts.y1, my, s), lerp(my, ey, s), s);
+      acc += Math.hypot(bx - px, by - py);
+      drawFlowingDash(p, px, py, bx, by, opts.t + acc * 0.0015, color, 0.5 * reveal, 2.4, 4);
+      px = bx;
+      py = by;
+    }
+  }
+
+  // Arrowhead.
+  if (head) {
+    const a = Math.atan2(uy, ux);
+    const spread = 0.42;
+    p.noStroke();
+    fill(p, color, 0.85 * reveal);
+    p.triangle(
+      opts.x2,
+      opts.y2,
+      opts.x2 - Math.cos(a - spread) * headSize * 1.6,
+      opts.y2 - Math.sin(a - spread) * headSize * 1.6,
+      opts.x2 - Math.cos(a + spread) * headSize * 1.6,
+      opts.y2 - Math.sin(a + spread) * headSize * 1.6,
+    );
+  }
+  p.pop();
+}
+
+// Compact stage pill — the cycle/timeline beat. Lighter than the Fed `node`:
+// a rounded card with sublabel/label/value stacked, an active accent glow, and
+// an optional ordinal badge. Reveal scales + fades it in.
+function stageNode(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    r?: number;
+    label: string;
+    sublabel?: string;
+    value?: string;
+    color?: RGB;
+    reveal?: number;
+    active?: number;
+    index?: number;
+  },
+): void {
+  const r = opts.r ?? 46;
+  const color = opts.color ?? PALETTE.accent;
+  const reveal = EASE.outCubic(opts.reveal ?? 1);
+  if (reveal <= 0.01) return;
+  const active = clamp01(opts.active ?? 0);
+
+  p.push();
+  p.translate(opts.x, opts.y);
+  p.scale(lerp(0.9, 1, reveal));
+
+  // Active hero ring (accent at 18%, brightening with active).
+  if (active > 0.01) {
+    glow(p, 0, 0, r, color, 0.4 * active * reveal);
+    p.noFill();
+    p.stroke(color[0], color[1], color[2], 0.18 * 255 * lerp(0.4, 1, active) * reveal);
+    p.strokeWeight(1.5);
+    p.circle(0, 0, r * 2);
+  } else {
+    p.noFill();
+    p.stroke(255, 255, 255, 0.1 * 255 * reveal);
+    p.strokeWeight(1.5);
+    p.circle(0, 0, r * 2);
+  }
+
+  // Inner card.
+  fill(p, PALETTE.surface, 0.72 * reveal);
+  p.stroke(255, 255, 255, 0.08 * 255 * reveal);
+  p.strokeWeight(1);
+  p.circle(0, 0, (r - 7) * 2);
+  p.pop();
+
+  const lit = active > 0.4;
+  // Sublabel.
+  if (opts.sublabel) {
+    label(p, {
+      x: opts.x,
+      y: opts.y - (opts.value ? 17 : 11),
+      text: opts.sublabel,
+      size: 10,
+      upper: true,
+      mono: true,
+      color: lit ? color : PALETTE.fgMuted,
+      alpha: reveal,
+    });
+  }
+  // Label (wrapped to two lines if long).
+  drawWrapped(p, opts.label, opts.x, opts.y + (opts.value ? 1 : opts.sublabel ? 4 : 0), {
+    size: r >= 52 ? 14 : 12.5,
+    weight: "bold",
+    color: PALETTE.fg,
+    alpha: reveal,
+    maxWidth: (r - 10) * 2,
+    lineH: 15,
+  });
+  // Value.
+  if (opts.value) {
+    label(p, {
+      x: opts.x,
+      y: opts.y + 19,
+      text: opts.value,
+      size: 14,
+      mono: true,
+      weight: "bold",
+      color,
+      alpha: reveal,
+    });
+  }
+
+  // Ordinal badge at the top edge.
+  if (opts.index != null) {
+    p.push();
+    p.noStroke();
+    fill(p, lit ? color : PALETTE.surface, reveal);
+    p.circle(opts.x, opts.y - r, 18);
+    if (!lit) {
+      p.noFill();
+      p.stroke(255, 255, 255, 0.16 * 255 * reveal);
+      p.strokeWeight(1);
+      p.circle(opts.x, opts.y - r, 18);
+    }
+    label(p, {
+      x: opts.x,
+      y: opts.y - r,
+      text: String(opts.index),
+      size: 11,
+      mono: true,
+      weight: "bold",
+      color: lit ? PALETTE.bg : PALETTE.fgMuted,
+      alpha: reveal,
+    });
+    p.pop();
+  }
+}
+
+// A single vertical bar for the comparison archetype. Track + accent fill that
+// grows from the baseline, with a label below and a value readout above.
+function bar(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    w: number;
+    maxH: number;
+    value: number;
+    label?: string;
+    readout?: string;
+    color?: RGB;
+    reveal?: number;
+    active?: number;
+  },
+): void {
+  const color = opts.color ?? PALETTE.accent;
+  const reveal = EASE.outCubic(opts.reveal ?? 1);
+  if (reveal <= 0.01) return;
+  const active = clamp01(opts.active ?? 0);
+  const v = clamp01(opts.value);
+  const grown = EASE.outQuint(reveal) * v;
+  const h = opts.maxH * grown;
+  const left = opts.x - opts.w / 2;
+
+  p.push();
+  // Track outline up the full height.
+  p.noFill();
+  p.stroke(255, 255, 255, 0.06 * 255 * reveal);
+  p.strokeWeight(1);
+  p.rect(left, opts.y - opts.maxH, opts.w, opts.maxH, 4);
+
+  // Fill — accent, brighter when active.
+  if (active > 0.2) glow(p, opts.x, opts.y - h, opts.w / 2, color, 0.3 * active);
+  p.noStroke();
+  fill(p, color, (active > 0.2 ? 0.95 : 0.7) * reveal);
+  if (h > 1) p.rect(left, opts.y - h, opts.w, h, 4);
+  p.pop();
+
+  // Readout above the fill.
+  if (opts.readout) {
+    label(p, {
+      x: opts.x,
+      y: opts.y - h - 14,
+      text: opts.readout,
+      size: 13,
+      mono: true,
+      weight: "bold",
+      color: active > 0.4 ? color : PALETTE.fg,
+      alpha: reveal,
+    });
+  }
+  // Label below the baseline.
+  if (opts.label) {
+    drawWrapped(p, opts.label, opts.x, opts.y + 20, {
+      size: 12,
+      weight: "bold",
+      color: active > 0.4 ? PALETTE.fg : PALETTE.fgMuted,
+      alpha: reveal,
+      maxWidth: opts.w + 40,
+      lineH: 14,
+    });
+  }
+}
+
+// Word-wrap helper for labels that may not fit one line under a pill/bar.
+function drawWrapped(
+  p: P5,
+  text: string,
+  x: number,
+  y: number,
+  opts: {
+    size: number;
+    weight?: "normal" | "bold";
+    color: RGB;
+    alpha: number;
+    maxWidth: number;
+    lineH: number;
+  },
+): void {
+  p.push();
+  p.textFont(SANS);
+  p.textSize(opts.size);
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    const trial = cur ? cur + " " + w : w;
+    if (p.textWidth(trial) > opts.maxWidth && cur) {
+      lines.push(cur);
+      cur = w;
+    } else {
+      cur = trial;
+    }
+  }
+  if (cur) lines.push(cur);
+  const capped = lines.slice(0, 2);
+  if (lines.length > 2) capped[1] = capped[1].replace(/\s*\S*$/, "…");
+  p.pop();
+  const startY = y - ((capped.length - 1) * opts.lineH) / 2;
+  capped.forEach((ln, i) => {
+    label(p, {
+      x,
+      y: startY + i * opts.lineH,
+      text: ln,
+      size: opts.size,
+      weight: opts.weight,
+      color: opts.color,
+      alpha: opts.alpha,
+    });
+  });
+}
+
 // ── network (NN topic) ──────────────────────────────────────────────────
 function neuron(
   p: P5,
@@ -1000,6 +1323,9 @@ export function createKit(): Kit {
     flowEdge,
     signal,
     gauge,
+    arrowEdge,
+    stageNode,
+    bar,
     neuron,
     neuronLayer,
     connectBundle,

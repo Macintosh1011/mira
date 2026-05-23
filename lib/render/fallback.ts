@@ -6,7 +6,8 @@ import type { RenderModule } from "@/lib/types";
  * A field of soft particles drifting along a flowing sine field — calm,
  * editorial, never blank during a live demo.
  *
- * Same contract as a generated SceneBundle.code body: returns cleanup.
+ * Same contract as a generated SceneBundle.code body: returns a SceneController.
+ * It's ambient (no phases), so setPhase is a no-op.
  */
 export const fallbackModule: RenderModule = (container, libs) => {
   const palette = ["#e8c97a", "#8fb98a", "#7fa8c9", "#cd8f6f"];
@@ -62,5 +63,5 @@ export const fallbackModule: RenderModule = (container, libs) => {
   };
 
   const inst = new libs.p5(sketch, container);
-  return () => inst.remove();
+  return { setPhase: () => {}, dispose: () => inst.remove() };
 };
