@@ -2,7 +2,7 @@
 
 > **The visualization layer for thinking.** (idea stage, nothing built yet)
 
-The idea is to build Ciechanowski/3Blue1Brown-style animated, narrated explanations of any concept, on demand, in seconds. You speak a question. Parallel Gemini 3.5 Flash sub-agents generate a synchronized in-browser animation plus narration, and your follow-up questions morph the existing scene instead of starting over.
+Mira is a generative visualization engine. You speak an idea, and it produces a Ciechanowski/3Blue1Brown-style animated, narrated explanation of that concept on demand, in seconds. Parallel Gemini 3.5 Flash sub-agents generate a synchronized in-browser animation plus narration, and your follow-up questions morph the existing scene instead of starting over. Think of it as a creative tool for turning ideas into moving visuals, the same category as a generative-art engine, not an assistant that answers questions for you.
 
 I just had this idea at the Google I/O Hackathon, May 2026. This README is me thinking it through, not documentation for something that runs. The repo is empty. Treat everything below as a target I want to hit, not a feature that exists.
 
@@ -10,7 +10,7 @@ I just had this idea at the Google I/O Hackathon, May 2026. This README is me th
 
 ## The problem I'm chasing
 
-Writing compresses mental models into text, and then the reader has to rebuild that model in their own head, which is slow and lossy. Visualization is how the rebuild actually gets done well, but right now it's artisanal and expensive. Bartosz Ciechanowski spends months on a single essay. Grant Sanderson spends days per 3Blue1Brown video. The output is incredible, but it doesn't scale to "explain this one thing to me right now."
+Most ideas live as text or equations, which is a compressed format that throws away the spatial, moving, cause-and-effect structure that made the idea legible in the first place. Visualization is how you get that structure back, but right now building it is artisanal and expensive. Bartosz Ciechanowski spends months on a single essay. Grant Sanderson spends days per 3Blue1Brown video. The output is incredible, but it doesn't scale to "render this one idea for me right now."
 
 So what do I actually do about it? The bet is that the artisanal layer underneath, the part where someone hand-codes an animation that matches a narration, has gotten cheap enough in 2026 to automate. If that's true, any concept could get its own short Ciechanowski-style piece without the three months. If it's not true yet, this is a 2027 idea and I'm early.
 
