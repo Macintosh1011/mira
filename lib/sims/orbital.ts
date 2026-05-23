@@ -81,6 +81,7 @@ const Sim: Sim = {
     camera.lookAt(0, 0, 0);
 
     scene.fog = new THREE.Fog(BG_HEX, 16, 32);
+    scene.background = new THREE.Color(BG_HEX); // near-black, not the default gray
 
     // Extra fill beyond the kit's hemisphere so the flat faces read with depth.
     const key = new THREE.DirectionalLight(0xffffff, 0.5);
