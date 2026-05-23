@@ -235,7 +235,9 @@ export async function generateCode(
 
   const opts: GenOptions = {
     systemInstruction: systemFor(renderer),
-    thinkingLevel: ThinkingLevel.LOW,
+    // MINIMAL thinking lands more single-shot successes inside the code budget;
+    // the deterministic generic scene is the safety net under it.
+    thinkingLevel: ThinkingLevel.MINIMAL,
     temperature: 0.55,
     maxOutputTokens: 8192,
     abortSignal,

@@ -5,9 +5,16 @@
  * one JSON per `data:` line, in order:
  *   plan -> code_chunk* -> code_done -> narration* -> verify? -> done
  *
- * Flow + failure handling (the cached fallback is the real safety net):
- *  - No API key, or live generation errors / exceeds the budget -> stream the
- *    closest hand-authored cached bundle so the stage never goes blank.
+ * Flow + failure handling. The narration the user HEARS always matches their
+ * query; only the SCENE CODE ever falls back:
+ *  - A genuine keyword match to a hand-authored bundle (a hero query) replays
+ *    that bundle whole — scene AND its narration. This is the ONLY path that
+ *    serves a cached topic's narration, and only when it truly matches.
+ *  - Otherwise the REAL orchestrator plan and the REAL narration cues are always
+ *    streamed. If live codegen fails / times out, we swap only the scene code
+ *    for an on-topic generic scene built deterministically from the plan, never
+ *    an off-topic cached bundle.
+ *  - No API key -> the generic scene over a minimal plan derived from the query.
  *  - mode "mutate" with a known previousSceneId -> orchestrator morphs the prior
  *    plan and codegen evolves the prior code; otherwise it's a fresh "new" run.
  *  - The managed-agents verifier is best-effort and time-boxed: we emit `verify`
@@ -17,6 +24,8 @@ import type {
   GenerateRequest,
   GenerateEvent,
   SceneBundle,
+  ScenePlan,
+  NarrationCue,
   Renderer,
 } from "@/lib/types";
 import { hasGeminiKey, withDeadline } from "@/lib/gemini";
@@ -27,9 +36,10 @@ import {
   narrationFromPlan,
 } from "@/lib/agents/narration";
 import { verifyScene } from "@/lib/agents/verifier";
+import { genericSceneCode } from "@/lib/agents/generic-scene";
 import { getScene, putScene } from "@/lib/agents/scene-store";
 import {
-  closestBundle,
+  matchBundle,
   getCachedBundle,
   planFromBundle,
 } from "@/lib/cache";
@@ -39,9 +49,14 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-/** Live-generation budget. Past this we bail to the cached bundle. */
+/**
+ * Live-generation budgets. The code budget is generous so a typical novel query
+ * actually finishes a real kit-composed scene; the deterministic generic scene
+ * is the safety net if it still doesn't. maxDuration (60s) leaves headroom for
+ * narration + verify after this.
+ */
 const PLAN_BUDGET_MS = 12_000;
-const CODE_BUDGET_MS = 14_000;
+const CODE_BUDGET_MS = 30_000;
 /**
  * Hard ceiling on waiting for the (best-effort) managed-agent verifier before
  * `done`. The Antigravity sandbox can take 10s+ on a cold start, so this cap
@@ -54,6 +69,44 @@ const encoder = new TextEncoder();
 
 function sse(event: GenerateEvent): Uint8Array {
   return encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/**
+ * A minimal, on-topic ScenePlan derived straight from the query — used only
+ * when there's no live plan (no key, or planning failed) so the generic scene
+ * and its narration still speak to what the user actually asked.
+ */
+function minimalPlan(query: string): ScenePlan {
+  const title = query.length > 48 ? `${query.slice(0, 47).trimEnd()}…` : query;
+  return {
+    id: `scene-${Date.now().toString(36)}`,
+    title: title || "Mira",
+    phases: [
+      { id: "overview", intent: query || title, renderer: "2d", approxDurationMs: 5000 },
+    ],
+  };
+}
+
+/**
+ * Stream the deterministic, ON-TOPIC generic scene for a real plan, with the
+ * real narration cues. The render stage is never blank and never off-topic.
+ */
+function streamGenericFallback(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  plan: ScenePlan,
+  narration: NarrationCue[],
+): void {
+  const renderer: Renderer = planRenderer(plan);
+  const sceneId = plan.id;
+  const code = genericSceneCode(plan);
+  controller.enqueue(sse({ type: "plan", plan }));
+  controller.enqueue(sse({ type: "code_chunk", sceneId, delta: code }));
+  controller.enqueue(sse({ type: "code_done", sceneId, code, renderer }));
+  for (const cue of narration) {
+    controller.enqueue(sse({ type: "narration", cue }));
+  }
+  controller.enqueue(sse({ type: "verify", status: "ok" }));
+  controller.enqueue(sse({ type: "done", bundle: { sceneId, renderer, code, narration } }));
 }
 
 /** Stream a cached bundle as a full, valid event sequence. */
@@ -100,9 +153,22 @@ async function runGeneration(
     }
   }
 
-  // No key at all: go straight to the safety net.
+  // Genuine keyword match to a hero bundle (Fed / Dijkstra / sine): replay it
+  // whole — pixel-perfect scene AND its matching narration. This is the only
+  // path that serves a cached topic's narration, and only when it truly matches
+  // the query, so an off-topic query never hears the wrong voiceover.
+  const matched = matchBundle(query);
+  if (matched) {
+    streamCachedBundle(controller, matched, query);
+    return;
+  }
+
+  // No key at all: there's no live generation to attempt. Still stay ON-TOPIC by
+  // building a minimal plan from the query and rendering the generic scene plus
+  // narration derived deterministically from the plan.
   if (!hasGeminiKey()) {
-    streamCachedBundle(controller, closestBundle(query), query);
+    const plan = minimalPlan(query);
+    streamGenericFallback(controller, plan, narrationFromPlan(plan));
     return;
   }
 
@@ -111,7 +177,8 @@ async function runGeneration(
       ? getScene(req.previousSceneId)
       : undefined;
 
-  // 1) PLAN (structured). Deadline -> fallback.
+  // 1) PLAN (structured). On failure we still keep the user on-topic with a
+  // minimal plan + generic scene rather than a wrong cached topic.
   let plan;
   try {
     plan = await withDeadline(PLAN_BUDGET_MS, (signal) =>
@@ -122,11 +189,13 @@ async function runGeneration(
       }),
     );
   } catch {
-    streamCachedBundle(controller, closestBundle(query), query);
+    const fallback = minimalPlan(query);
+    streamGenericFallback(controller, fallback, narrationFromPlan(fallback));
     return;
   }
   if (!plan.phases.length) {
-    streamCachedBundle(controller, closestBundle(query), query);
+    const fallback = minimalPlan(query);
+    streamGenericFallback(controller, fallback, narrationFromPlan(fallback));
     return;
   }
   controller.enqueue(sse({ type: "plan", plan }));
@@ -134,8 +203,23 @@ async function runGeneration(
   const renderer: Renderer = planRenderer(plan);
   const sceneId = plan.id;
 
-  // 2) CODE (streamed). Stream deltas live; deadline/error/garbage -> fallback.
+  // 2) NARRATION (structured, deterministic timeline) — generated up front from
+  // the REAL plan so the user always hears on-topic narration even when the
+  // scene code falls back. On failure, derive cues from the plan intents.
+  let narration: NarrationCue[];
+  try {
+    narration = await withDeadline(PLAN_BUDGET_MS, (signal) =>
+      generateNarration({ plan, query, abortSignal: signal }),
+    );
+  } catch {
+    narration = narrationFromPlan(plan);
+  }
+
+  // 3) CODE (streamed). Stream deltas live. On deadline/error/garbage we keep
+  // the real plan + real narration and swap ONLY the scene code for the
+  // deterministic, on-topic generic scene.
   let code = "";
+  let codeOk = false;
   try {
     const result = await withDeadline(CODE_BUDGET_MS, (signal) =>
       generateCode({
@@ -148,30 +232,17 @@ async function runGeneration(
       }),
     );
     code = result.code;
+    codeOk = looksRunnable(code);
   } catch {
-    streamCachedBundle(controller, closestBundle(query), query);
-    return;
+    codeOk = false;
   }
 
-  if (!looksRunnable(code)) {
-    // Model produced unusable code despite streaming chunks. Swap in the cached
-    // bundle for the final artifact so the render host gets something that runs.
-    streamCachedBundle(controller, closestBundle(query), query);
-    return;
+  if (!codeOk) {
+    code = genericSceneCode(plan);
   }
 
   controller.enqueue(sse({ type: "code_done", sceneId, code, renderer }));
 
-  // 3) NARRATION (structured, deterministic timeline). On failure, derive from
-  // the plan intents so we always have cues.
-  let narration;
-  try {
-    narration = await withDeadline(PLAN_BUDGET_MS, (signal) =>
-      generateNarration({ plan, query, abortSignal: signal }),
-    );
-  } catch {
-    narration = narrationFromPlan(plan);
-  }
   for (const cue of narration) {
     controller.enqueue(sse({ type: "narration", cue }));
   }
@@ -236,13 +307,18 @@ export async function POST(request: Request): Promise<Response> {
       try {
         await runGeneration(controller, req);
       } catch (err) {
-        // Last-resort guard: emit an error then a cached bundle so the stage is
-        // never blank, then done.
+        // Last-resort guard: emit an error then the ON-TOPIC generic scene over
+        // a minimal plan so the stage is never blank and never off-topic.
         const message =
           err instanceof Error ? err.message : "generation failed";
         try {
           controller.enqueue(sse({ type: "error", message }));
-          streamCachedBundle(controller, closestBundle(req.query), req.query);
+          const fallback = minimalPlan(req.query);
+          streamGenericFallback(
+            controller,
+            fallback,
+            narrationFromPlan(fallback),
+          );
         } catch {
           // controller already closed; nothing more to do.
         }
