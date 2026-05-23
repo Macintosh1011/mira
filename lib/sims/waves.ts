@@ -1,12 +1,16 @@
 /**
  * WAVES — a literal, interactive simulation of wave superposition.
  *
- * Two traveling sine waves share a 1D medium and SUPERPOSE. The individual
- * waves draw faint (teal + blue); their pointwise sum draws bright (amber).
- * Tune the two frequencies together to collapse a beat pattern; tune them to
- * the SAME frequency travelling in OPPOSITE directions and the medium locks
- * into a standing wave with marked nodes and antinodes. A final beat swaps to a
- * 2D ripple tank: two point sources whose circular waves interfere into fringes.
+ * Two traveling sine waves share a 1D medium and SUPERPOSE. The story unfolds
+ * like a video: at the opening beat the medium carries ONE wave and nothing
+ * else; each narration beat reveals exactly one new idea and holds there.
+ *   P0  one traveling sine wave on a clean axis — nothing else
+ *   P1  a second wave fades in, faint
+ *   P2  their superposition — the bright amber resultant appears
+ *   P3  interference / beats — the beat envelope + the |f1−f2| readout
+ *   P4  the standing wave locks — nodes (dashed + dots) + antinodes, and the
+ *       equation swaps to y = 2A·sin(kx)·cos(ωt)
+ *   P5  a 2D ripple tank — two point sources interfering into fringes (last beat)
  *
  * Physics (all real, all derived from the live slider state):
  *   y_i(x,t) = A · sin(k_i·x − ω_i·t + φ)            traveling wave
@@ -68,9 +72,14 @@ const DEFAULT_PHASE_LABELS = [
   "standing wave",
   "ripple tank",
 ];
-const DEFAULT_EQUATION = "y(x,t)=A\\,\\sin(kx-\\omega t)";
+// Beat-gated equations: the traveling-wave law once we sum (P2+), and the
+// standing-wave identity only when the medium locks (P4+).
+const EQ_TRAVELING = "y(x,t)=A\\,\\sin(kx-\\omega t)";
+const EQ_STANDING = "y(x,t)=2A\\,\\sin(kx)\\,\\cos(\\omega t)";
 
 const TWO_PI = Math.PI * 2;
+// Per-beat reveal duration: each idea fades in over this, then holds.
+const REVEAL_MS = 900;
 
 const sim: Sim = {
   id: "waves",
@@ -88,7 +97,9 @@ const sim: Sim = {
       content?.phases?.length
         ? content.phases.map((ph, i) => ph.label || DEFAULT_PHASE_LABELS[i] || "")
         : DEFAULT_PHASE_LABELS;
-    const equationTex = content?.equation || DEFAULT_EQUATION;
+    // The traveling-wave law is the default; an explicit content equation
+    // overrides only the P2/P3 form. The standing-wave identity is fixed.
+    const equationTex = content?.equation || EQ_TRAVELING;
 
     // Live, mutable parameter state, seeded from spec defaults + content params.
     const params: Record<ControlKey, number> = { ...DEFAULTS };
@@ -113,9 +124,9 @@ const sim: Sim = {
     let elapsedMs = 0; // deterministic clock: advanced by capped dt each frame
 
     // KaTeX equation overlaid as a positioned DOM node (the proper way to show
-    // TeX). Falls back to nothing here; the canvas always draws a mono version
-    // too, so the formula is visible regardless of katex availability.
-    const eqEl = mountEquation(container, libs, equationTex, palette);
+    // TeX). It is HIDDEN until the superposition beat, swapped to the
+    // standing-wave identity at the standing beat, and dimmed in the tank.
+    const eqOverlay = mountEquation(container, libs, palette);
 
     const sketch = (p: P5) => {
       let W = container.clientWidth || 1280;
@@ -143,12 +154,25 @@ const sim: Sim = {
         lastMs = now;
         elapsedMs += dt;
         const tSec = elapsedMs / 1000;
-        const local = ease.quintic(clamp01((elapsedMs - phaseStartMs) / 900));
+        // Per-beat reveal: 0→1 over REVEAL_MS, then holds at 1.
+        const local = ease.quintic(clamp01((elapsedMs - phaseStartMs) / REVEAL_MS));
 
         kit.grid(p);
 
         const ripple = phase >= 5;
-        if (eqEl) eqEl.style.opacity = ripple ? "0.35" : "1";
+        // Equation: absent before P2, traveling law at P2/P3, standing identity
+        // at P4, dimmed once the tank takes over.
+        if (eqOverlay) {
+          if (phase < 2) {
+            eqOverlay.set("", 0);
+          } else if (phase >= 4 && !ripple && derive(params).harmonicLock) {
+            eqOverlay.set(EQ_STANDING, 1);
+          } else if (ripple) {
+            eqOverlay.set(EQ_TRAVELING, 0.32);
+          } else {
+            eqOverlay.set(equationTex, 1);
+          }
+        }
 
         if (ripple) {
           drawRippleTank(p, kit, W, H, params, tSec, local, C_RESULT);
@@ -159,8 +183,7 @@ const sim: Sim = {
           });
         }
         drawHud(p, kit, {
-          W, H, phase, phaseLabels, params, equationTex,
-          hasDomEquation: eqEl !== null,
+          W, H, phase, phaseLabels, params, local,
           C_RESULT, C_WAVE1, C_WAVE2,
         });
       };
@@ -187,7 +210,7 @@ const sim: Sim = {
         params[key as ControlKey] = clampSpec(spec, value);
       },
       dispose() {
-        if (eqEl && eqEl.parentNode) eqEl.parentNode.removeChild(eqEl);
+        if (eqOverlay) eqOverlay.remove();
         inst.remove();
       },
     };
@@ -269,12 +292,15 @@ function draw1D(p: P5, kit: Kit, L: Box, ctx: Draw1DCtx) {
   const { phase, tSec, local, ease } = ctx;
   const amp = L.plotH;
 
+  // The axes are part of the bare scene — present from the very first beat, but
+  // they ease in at P0 so the opening isn't an abrupt cut.
+  const axesReveal = phase === 0 ? ease.outCubic(local) : 1;
   kit.axes(p, {
-    x: L.x0, y: L.cy - amp, w: L.plotW, h: amp * 2, reveal: 1,
+    x: L.x0, y: L.cy - amp, w: L.plotW, h: amp * 2, reveal: axesReveal,
     xLabel: "position  x", yLabel: "displacement  y",
   });
   p.push();
-  p.stroke(255, 255, 255, 0.1 * 255);
+  p.stroke(255, 255, 255, 0.1 * 255 * axesReveal);
   p.strokeWeight(1);
   p.line(L.x0, L.cy, L.x1, L.cy);
   p.pop();
@@ -286,19 +312,28 @@ function draw1D(p: P5, kit: Kit, L: Box, ctx: Draw1DCtx) {
   const sy = (val: number) => L.cy - val * amp;
 
   const standing = phase >= 4 && d.harmonicLock;
+  // Per-element reveal: each wave eases in ONLY on the beat it is introduced,
+  // and stays at full opacity afterwards. Before its beat it is invisible.
   const w1Rev = phase === 0 ? local : 1;
   const w2Rev = phase === 1 ? local : phase > 1 ? 1 : 0;
   const sumRev = phase === 2 ? local : phase > 2 ? 1 : 0;
 
-  // Faint component waves.
+  // P0: ONE wave, drawn a touch brighter since it is the only thing on screen.
+  // Once a second wave exists (P1+) both components dim to "context" weight so
+  // the amber resultant (P2+) can own the focus.
+  const compAlpha = phase === 0 ? 0.85 : 0.5;
+
+  // Component wave 1 (present from P0).
   if (w1Rev > 0.01) {
-    drawSampledWave(p, kit, N, ux, sx, sy, (u) => y1(u, tSec, d), ctx.C_WAVE1, 0.5 * w1Rev, 1.5);
+    drawSampledWave(p, kit, N, ux, sx, sy, (u) => y1(u, tSec, d), ctx.C_WAVE1, compAlpha * w1Rev, 1.5);
   }
+  // Component wave 2 (introduced at P1).
   if (phase >= 1 && w2Rev > 0.01) {
     drawSampledWave(p, kit, N, ux, sx, sy, (u) => y2(u, tSec, d), ctx.C_WAVE2, 0.5 * w2Rev, 1.5);
   }
 
-  // Bright resultant + envelope.
+  // Bright amber resultant + its envelope (introduced at P2; the beat envelope
+  // is itself gated to the interference beat, P3).
   if (phase >= 2 && sumRev > 0.01) {
     if (standing) {
       const env = (u: number) => 2 * d.A * Math.abs(Math.sin(d.k1 * u));
@@ -320,6 +355,7 @@ function draw1D(p: P5, kit: Kit, L: Box, ctx: Draw1DCtx) {
     );
   }
 
+  // Nodes + antinodes appear only when the standing wave locks (P4).
   if (standing) {
     drawNodes(p, kit, d, L, sx, ctx.C_NODE, ctx.C_RESULT, ease.outCubic(local));
   }
@@ -474,7 +510,7 @@ function drawRippleTank(
   });
 }
 
-// ── HUD: readouts + equation fallback + phase dots ───────────────────────────
+// ── HUD: title + beat-gated legend / readouts / phase dots ────────────────────
 
 interface HudCtx {
   W: number;
@@ -482,8 +518,7 @@ interface HudCtx {
   phase: number;
   phaseLabels: string[];
   params: Record<ControlKey, number>;
-  equationTex: string;
-  hasDomEquation: boolean;
+  local: number;
   C_RESULT: RGB;
   C_WAVE1: RGB;
   C_WAVE2: RGB;
@@ -492,46 +527,61 @@ interface HudCtx {
 function drawHud(p: P5, kit: Kit, ctx: HudCtx) {
   const { palette } = kit;
   const d = derive(ctx.params);
-  const { W, H, phase } = ctx;
+  const { W, H, phase, local } = ctx;
+  const beatFade = phase === 0 ? local : 1;
 
+  // Title + the current beat name. Present from the start (the only text at P0).
   kit.label(p, {
     x: 28, y: 30, text: "WAVE SUPERPOSITION", size: 12, upper: true, mono: true,
-    color: palette.fgMuted, align: "left",
+    color: palette.fgMuted, align: "left", alpha: beatFade,
   });
-
-  // Canvas equation: a clean mono fallback when no DOM/KaTeX overlay is present.
-  if (!ctx.hasDomEquation) {
+  const beatName = ctx.phaseLabels[phase] ?? "";
+  if (beatName) {
     kit.label(p, {
-      x: 28, y: 54, text: texToPlain(ctx.equationTex), size: 18, mono: true,
-      weight: "bold", color: palette.fg, align: "left",
+      x: 28, y: 52, text: beatName, size: 13, upper: true, mono: true,
+      weight: "bold", color: palette.fg, align: "left", alpha: beatFade,
     });
   }
 
-  // Color legend.
-  const legendY = ctx.hasDomEquation ? 56 : 82;
-  legendSwatch(p, kit, 28, legendY, ctx.C_WAVE1, "wave 1");
-  legendSwatch(p, kit, 120, legendY, ctx.C_WAVE2, "wave 2");
-  legendSwatch(p, kit, 212, legendY, ctx.C_RESULT, "resultant");
+  // Legend: wave 1 from the first beat it owns the screen alone (P0),
+  // wave 2 once it joins (P1), resultant once it appears (P2). The DOM KaTeX
+  // overlay occupies the top-left from P2, so push the legend down then.
+  const eqShown = phase >= 2 && phase < 5;
+  const legendY = eqShown ? 96 : 78;
+  legendSwatch(p, kit, 28, legendY, ctx.C_WAVE1, "wave 1", 1);
+  if (phase >= 1) {
+    legendSwatch(p, kit, 120, legendY, ctx.C_WAVE2, "wave 2", phase === 1 ? local : 1);
+  }
+  if (phase >= 2 && phase < 5) {
+    legendSwatch(p, kit, 212, legendY, ctx.C_RESULT, "resultant", phase === 2 ? local : 1);
+  }
 
-  // Right-hand readouts: λ, T, v, beat / standing-lock.
+  // Right-hand readouts, revealed beat-by-beat. Nothing at P0 (bare scene).
   const rx = W - 28;
   let ry = 30;
-  const row = (label: string, value: string, color: RGB) => {
-    kit.label(p, { x: rx - 104, y: ry, text: label, size: 11, upper: true, mono: true, color: palette.fgMuted, align: "right" });
-    kit.label(p, { x: rx, y: ry, text: value, size: 13, mono: true, weight: "bold", color, align: "right" });
+  const row = (label: string, value: string, color: RGB, alpha = 1) => {
+    kit.label(p, { x: rx - 104, y: ry, text: label, size: 11, upper: true, mono: true, color: palette.fgMuted, align: "right", alpha });
+    kit.label(p, { x: rx, y: ry, text: value, size: 13, mono: true, weight: "bold", color, align: "right", alpha });
     ry += 22;
   };
-  row("f1", d.f1.toFixed(2) + " Hz", ctx.C_WAVE1);
-  row("f2", d.f2.toFixed(2) + " Hz", ctx.C_WAVE2);
-  row("λ1", d.lambda1.toFixed(3), palette.fg);
-  row("T1", Number.isFinite(d.T1) ? d.T1.toFixed(3) + " s" : "∞", palette.fg);
-  row("v = fλ", d.v.toFixed(3), palette.fg);
-  if (d.harmonicLock) {
-    row("standing", "n = " + d.nearestHarmonic, ctx.C_RESULT);
-  } else if (d.df > 1e-3) {
-    row("beat", d.beatFreq.toFixed(2) + " Hz", ctx.C_RESULT);
-  } else {
-    row("Δf", "0.00 Hz", palette.fgMuted);
+  if (phase >= 1) {
+    // P1: the two frequencies that are about to combine.
+    row("f1", d.f1.toFixed(2) + " Hz", ctx.C_WAVE1, phase === 1 ? local : 1);
+  }
+  if (phase >= 2) {
+    // P2: f2 + the wave-speed identity v = fλ that the superposition obeys.
+    row("f2", d.f2.toFixed(2) + " Hz", ctx.C_WAVE2, phase === 2 ? local : 1);
+    row("λ1", d.lambda1.toFixed(3), palette.fg, phase === 2 ? local : 1);
+    row("v = fλ", d.v.toFixed(3), palette.fg, phase === 2 ? local : 1);
+  }
+  if (phase >= 3 && phase < 5) {
+    // P3: the payoff readout — the beat frequency |f1−f2| (or the standing
+    // lock harmonic once the medium locks at P4).
+    if (d.harmonicLock) {
+      row("standing", "n = " + d.nearestHarmonic, ctx.C_RESULT, phase === 4 ? local : 1);
+    } else {
+      row("beat |f1−f2|", d.beatFreq.toFixed(2) + " Hz", ctx.C_RESULT, phase === 3 ? local : 1);
+    }
   }
 
   kit.phaseDots(p, {
@@ -541,16 +591,17 @@ function drawHud(p: P5, kit: Kit, ctx: HudCtx) {
 
   const note = phaseNote(phase, d);
   if (note) {
-    kit.label(p, { x: W / 2, y: H - 28, text: note, size: 12, color: palette.fg, alpha: 0.85 });
+    kit.label(p, { x: W / 2, y: H - 28, text: note, size: 12, color: palette.fg, alpha: 0.85 * beatFade });
   }
 }
 
-function legendSwatch(p: P5, kit: Kit, x: number, y: number, color: RGB, text: string) {
+function legendSwatch(p: P5, kit: Kit, x: number, y: number, color: RGB, text: string, alpha: number) {
+  if (alpha <= 0.01) return;
   p.push();
-  kit.stroke(p, color, 1, 2);
+  kit.stroke(p, color, alpha, 2);
   p.line(x, y, x + 16, y);
   p.pop();
-  kit.label(p, { x: x + 22, y, text, size: 10, upper: true, mono: true, color: kit.palette.fgMuted, align: "left" });
+  kit.label(p, { x: x + 22, y, text, size: 10, upper: true, mono: true, color: kit.palette.fgMuted, align: "left", alpha });
 }
 
 function phaseNote(phase: number, d: Derived): string {
@@ -569,20 +620,26 @@ function phaseNote(phase: number, d: Derived): string {
   }
 }
 
-// ── KaTeX equation overlay (DOM), with graceful absence ──────────────────────
+// ── KaTeX equation overlay (DOM), beat-gated visibility ───────────────────────
+
+interface EquationOverlay {
+  /** Set the rendered TeX (re-renders only on change) and opacity 0..1. */
+  set(tex: string, opacity: number): void;
+  remove(): void;
+}
 
 /**
- * Render the KaTeX source to an absolutely-positioned DOM node over the canvas.
- * Returns null if katex is unavailable or rendering throws (the canvas then
- * draws a mono-text fallback instead). The container is made position-relative
- * only if it is currently static, and reverted on dispose via node removal.
+ * Mount an absolutely-positioned DOM node over the canvas and return a handle
+ * that lazily (re-)renders KaTeX only when the source changes, and tweens
+ * opacity for the beat-gated reveal. Returns null if katex is unavailable or
+ * rendering throws. The container is made position-relative only if currently
+ * static; the node is removed on dispose.
  */
 function mountEquation(
   container: HTMLElement,
   libs: SimLibs,
-  tex: string,
   palette: Kit["palette"],
-): HTMLElement | null {
+): EquationOverlay | null {
   const katex = libs.katex;
   const renderToString: ((t: string, o?: object) => string) | undefined =
     katex && typeof katex.renderToString === "function"
@@ -590,43 +647,43 @@ function mountEquation(
       : katex?.default && typeof katex.default.renderToString === "function"
         ? katex.default.renderToString.bind(katex.default)
         : undefined;
-  if (!renderToString) return null;
+  if (!renderToString || typeof document === "undefined") return null;
 
-  try {
-    const html = renderToString(tex, { throwOnError: false, output: "html", displayMode: false });
-    if (typeof document === "undefined") return null;
-    const el = document.createElement("div");
-    el.innerHTML = html;
-    el.style.position = "absolute";
-    el.style.left = "28px";
-    el.style.top = "42px";
-    el.style.pointerEvents = "none";
-    el.style.color = `rgb(${palette.fg[0]},${palette.fg[1]},${palette.fg[2]})`;
-    el.style.fontSize = "18px";
-    el.style.zIndex = "2";
-    el.style.transition = "opacity 200ms ease";
-    const cs = typeof window !== "undefined" ? window.getComputedStyle(container) : null;
-    if (cs && cs.position === "static") container.style.position = "relative";
-    container.appendChild(el);
-    return el;
-  } catch {
-    return null;
-  }
-}
+  const el = document.createElement("div");
+  el.style.position = "absolute";
+  el.style.left = "28px";
+  el.style.top = "64px";
+  el.style.pointerEvents = "none";
+  el.style.color = `rgb(${palette.fg[0]},${palette.fg[1]},${palette.fg[2]})`;
+  el.style.fontSize = "18px";
+  el.style.zIndex = "2";
+  el.style.opacity = "0";
+  el.style.transition = "opacity 320ms cubic-bezier(0.16,1,0.3,1)";
+  const cs = typeof window !== "undefined" ? window.getComputedStyle(container) : null;
+  if (cs && cs.position === "static") container.style.position = "relative";
+  container.appendChild(el);
 
-/** Minimal TeX → unicode for the canvas fallback equation. */
-function texToPlain(tex: string): string {
-  return tex
-    .replace(/\\,/g, " ")
-    .replace(/\\sin/g, "sin")
-    .replace(/\\cos/g, "cos")
-    .replace(/\\omega/g, "ω")
-    .replace(/\\pi/g, "π")
-    .replace(/\\lambda/g, "λ")
-    .replace(/\\Delta/g, "Δ")
-    .replace(/[{}]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  let lastTex = "";
+  return {
+    set(tex: string, opacity: number) {
+      if (tex && tex !== lastTex) {
+        try {
+          el.innerHTML = renderToString(tex, {
+            throwOnError: false, output: "html", displayMode: false,
+          });
+        } catch {
+          el.innerHTML = "";
+        }
+        lastTex = tex;
+      } else if (!tex) {
+        lastTex = "";
+      }
+      el.style.opacity = String(tex ? opacity : 0);
+    },
+    remove() {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    },
+  };
 }
 
 // ── small utils ──────────────────────────────────────────────────────────────

@@ -1,8 +1,7 @@
 /**
- * Interactive ALGORITHM simulation — graph shortest-path search, executed step
- * by step on a weighted grid with obstacles. Watch the frontier (open set)
- * expand, tentative distances update on each cell, the visited (closed) set
- * fill in, and the final shortest path light up.
+ * Interactive ALGORITHM simulation — graph shortest-path search that unfolds
+ * like a video, one narration beat at a time. The search EXPANDS PROGRESSIVELY
+ * as the phases advance; we never show a completed search at beat 0.
  *
  * Three algorithms, swappable live, to contrast frontier SHAPES:
  *   • Dijkstra  — uniform-cost, expands in concentric cost rings (round blob)
@@ -13,15 +12,21 @@
  * seeded grid and record an ordered EVENT LOG — one entry per cell expansion,
  * each carrying the open/closed snapshot and the dist field at that instant —
  * plus the reconstructed path. The animation is a cursor into that log, so it
- * is fully deterministic and scrubbable. setPhase pins the cursor to one of the
- * four narration beats; `speed` advances it via rAF between beats.
+ * is fully deterministic and scrubbable.
  *
- * Aesthetic per the kit brief: amber #efc540 frontier + path on #0c0c0e, teal
- * visited, dim unvisited, 1.5px strokes, flat. Distances render ON cells; a
- * legend + complexity equation + live readouts sit in the margins. The kit's
- * declared technical primitives (readout/legend/equation) are NOT implemented
- * in this build, so we compose those from the primitives that exist (`label`,
- * raw KaTeX) to stay self-contained.
+ * Story beats (setPhase pins the cursor; `speed` walks it between beats):
+ *   P0  bare grid — just the start S and goal G. Nothing explored, no frontier,
+ *       no distances, no readouts, no equation. Negative space.
+ *   P1  the frontier begins expanding from the start — the visited (closed) set
+ *       grows mid-search; the goal is NOT yet reached, no path, no cost.
+ *   P2  the frontier reaches the goal — the search front touches G.
+ *   P3  the shortest path traces back + the cost readout + the complexity
+ *       equation O((V+E)log V). The final path and cost appear ONLY here.
+ *
+ * Aesthetic per the kit brief: amber #efc540 on the active frontier + path on
+ * #0c0c0e, teal visited, dim unvisited/walls, thin flat 1.5px strokes, generous
+ * space. The complexity equation is a single KaTeX HTML overlay revealed at P3
+ * and torn down on dispose. Readouts/legend compose from `kit.label`.
  *
  * Contract: default-exports a `Sim`. `create` mounts a p5 instance and returns
  * a SceneController { setPhase, setParam, dispose }. No runtime p5/three import
@@ -90,6 +95,8 @@ interface SearchResult {
   path: number[];
   /** Final true cost to the goal, or Infinity. */
   goalCost: number;
+  /** Event index at which the goal was first popped (frontier reaches goal). */
+  goalEvent: number;
 }
 
 /**
@@ -273,6 +280,7 @@ function runSearch(
       events,
       path,
       goalCost: dist[goalIdx],
+      goalEvent: events.length - 1, // goal is popped on the final recorded event
     };
   }
 
@@ -294,7 +302,7 @@ function runSearch(
       path.push(u);
       events.push({ expanded: u, open: open.slice(), closed: closed.slice(), dist: dist.slice(), reachedGoal: c === cols - 1 });
     }
-    result = { rows, cols, walls: walls.slice(), startIdx, goalIdx, events, path, goalCost: cols - 1 };
+    result = { rows, cols, walls: walls.slice(), startIdx, goalIdx, events, path, goalCost: cols - 1, goalEvent: events.length - 1 };
   }
 
   return result;
@@ -342,22 +350,32 @@ const sim: Sim = {
     let phase = 0;
     const PHASE_COUNT = 4;
 
-    // Map a phase index to a target cursor (in events). 4 beats:
-    //   0 start            → just the start cell (cursor 0)
-    //   1 frontier expands → ~55% through the expansions
-    //   2 target reached   → the final expansion (goal popped)
-    //   3 path traced      → final expansion + path-trace animation
+    // Map a phase index to a target cursor (in the event log). 4 beats:
+    //   P0 bare grid     → cursor pinned at 0 (no expansions drawn at all)
+    //   P1 frontier grows → mid-expansion, comfortably BEFORE the goal is popped
+    //   P2 reaches goal   → the goal-popping event (last recorded event)
+    //   P3 path traced    → goal event + the path-trace animation
+    // We separate P0 (cursor 0, but draw NOTHING expanded) from P1 (the wave
+    // begins) so beat 0 is a clean, empty graph and the search unfolds from P1.
     const phaseTarget = (ph: number): number => {
-      const last = Math.max(0, search.events.length - 1);
+      const goal = Math.max(0, search.goalEvent);
       if (ph <= 0) return 0;
-      if (ph === 1) return Math.round(last * 0.55);
-      return last; // phases 2 and 3 both sit at the final expansion
+      if (ph === 1) {
+        // ~55% of the way to the goal pop, clamped one event short so the
+        // frontier is visibly mid-flight and never accidentally reaches G.
+        return Math.min(Math.max(1, goal - 1), Math.round(goal * 0.55));
+      }
+      return goal; // P2 and P3 both sit at the goal-popping event
     };
 
     // Path-trace progress 0..1, only meaningful in phase 3.
     let pathT = 0;
 
     // ── KaTeX complexity equation overlay (the kit's `equation` is unbuilt). ──
+    // Revealed ONLY at the final beat (P3), beside the cost readout. Hidden at
+    // P0–P2 via opacity so the early beats stay bare. Re-rendered when the
+    // algorithm changes (the complexity differs per algorithm). Torn down on
+    // dispose.
     const eqEl = document.createElement("div");
     eqEl.style.position = "absolute";
     eqEl.style.pointerEvents = "none";
@@ -366,6 +384,8 @@ const sim: Sim = {
     eqEl.style.zIndex = "2";
     eqEl.style.left = "0";
     eqEl.style.top = "0";
+    eqEl.style.opacity = "0";
+    eqEl.style.transition = "opacity 480ms cubic-bezier(0.16,1,0.3,1)";
     if (getComputedStyle(container).position === "static") {
       container.style.position = "relative";
     }
@@ -388,6 +408,10 @@ const sim: Sim = {
       } catch {
         eqEl.textContent = "O((V+E) log V)";
       }
+    };
+    // Show the equation only at the final beat.
+    const updateEquationVisibility = () => {
+      eqEl.style.opacity = phase >= 3 ? "1" : "0";
     };
 
     // ── geometry, recomputed on resize / grid change ──
@@ -437,6 +461,7 @@ const sim: Sim = {
         cv.style("display", "block");
         kit.useFonts(p);
         layout();
+        // Pre-render the equation HTML (still hidden at opacity 0 until P3).
         renderEquation(Math.round(params.algorithm));
       };
 
@@ -459,9 +484,16 @@ const sim: Sim = {
         // Path trace eases in during phase 3, once the cursor has arrived.
         if (phase >= 3 && cursor >= target - 0.001) {
           pathT = Math.min(1, pathT + dt * 1.1);
-        } else if (phase < 2) {
+        } else if (phase < 3) {
           pathT = 0;
         }
+
+        // Beat gating — the search unfolds with the narration:
+        //   P0 bare grid (start + goal only), nothing explored
+        //   P1+ the frontier/visited sets are drawn (the wave expands)
+        //   P3  the path + cost + complexity equation appear
+        const showSearch = phase >= 1;
+        const showPath = phase >= 3;
 
         const stepIdx = Math.min(search.events.length - 1, Math.floor(cursor));
         const frac = ease.outCubic(cursor - Math.floor(cursor));
@@ -473,16 +505,16 @@ const sim: Sim = {
         // ── grid cells ──
         p.push();
         p.rectMode(p.CORNER);
-        const showDist = cell >= 22; // only label distances when cells are big enough
+        const showDist = showSearch && cell >= 22; // only label distances when cells are big enough
         for (let i = 0; i < search.rows * search.cols; i++) {
           const r = Math.floor(i / search.cols);
           const c = i % search.cols;
           const x = originX + c * cell;
           const y = originY + r * cell;
           const isWall = search.walls[i] === 1;
-          const isClosed = ev.closed[i] === 1;
-          const isOpen = ev.open[i] === 1 && !isClosed;
-          const justExpanded = i === ev.expanded && stepIdx > 0;
+          const isClosed = showSearch && ev.closed[i] === 1;
+          const isOpen = showSearch && ev.open[i] === 1 && !isClosed;
+          const justExpanded = showSearch && i === ev.expanded && stepIdx > 0;
 
           p.noStroke();
           if (isWall) {
@@ -524,26 +556,25 @@ const sim: Sim = {
         p.pop();
 
         // ── current frontier outline: stroke the open cells in amber to make
-        // the "wavefront" pop even when distance labels are off ──
-        p.push();
-        p.noFill();
-        p.stroke(FRONTIER[0], FRONTIER[1], FRONTIER[2], 0.55 * 255);
-        p.strokeWeight(1.5);
-        for (let i = 0; i < search.rows * search.cols; i++) {
-          if (ev.open[i] === 1 && ev.closed[i] === 0) {
-            const c = i % search.cols;
-            const r = Math.floor(i / search.cols);
-            p.rect(originX + c * cell + 0.5, originY + r * cell + 0.5, cell - 1, cell - 1, 2);
+        // the "wavefront" pop even when distance labels are off (P1+ only) ──
+        if (showSearch) {
+          p.push();
+          p.noFill();
+          p.stroke(FRONTIER[0], FRONTIER[1], FRONTIER[2], 0.55 * 255);
+          p.strokeWeight(1.5);
+          for (let i = 0; i < search.rows * search.cols; i++) {
+            if (ev.open[i] === 1 && ev.closed[i] === 0) {
+              const c = i % search.cols;
+              const r = Math.floor(i / search.cols);
+              p.rect(originX + c * cell + 0.5, originY + r * cell + 0.5, cell - 1, cell - 1, 2);
+            }
           }
+          p.pop();
         }
-        p.pop();
 
-        // ── shortest path (phase 2 reveals start→goal trace, phase 3 fully lit) ──
-        if (phase >= 2 && ev.reachedGoal && search.path.length > 1) {
-          const drawN =
-            phase >= 3
-              ? Math.max(2, Math.floor(2 + (search.path.length - 2) * ease.outCubic(pathT)))
-              : search.path.length;
+        // ── shortest path — traces back ONLY at the final beat (P3) ──
+        if (showPath && ev.reachedGoal && search.path.length > 1) {
+          const drawN = Math.max(2, Math.floor(2 + (search.path.length - 2) * ease.outCubic(pathT)));
           p.push();
           p.noFill();
           // glow underlay
@@ -617,25 +648,32 @@ const sim: Sim = {
           align: "left",
         });
 
-        // Readouts (right side), stacked. Composed from kit.label since the
-        // kit's `readout` primitive isn't implemented in this build.
+        // Readouts (right side), stacked, gated by beat. Composed from
+        // kit.label since the kit's `readout` primitive isn't built. At P0 the
+        // graph is bare — no counts. The cost appears only at the final beat.
         const readout = (yTop: number, cap: string, val: string, col: RGB) => {
           kit.label(p, { x: W - PAD_SIDE, y: yTop, text: cap, size: 10, upper: true, mono: true, color: palette.fgMuted, align: "right" });
           kit.label(p, { x: W - PAD_SIDE, y: yTop + 18, text: val, size: 20, mono: true, weight: "bold", color: col, align: "right" });
         };
-        readout(20, "Nodes expanded", String(expandedCount), VISITED);
-        readout(58, "Frontier size", String(openCount), FRONTIER);
-        if (ev.reachedGoal) {
-          readout(96, "Path cost", String(search.goalCost), FRONTIER);
-        } else {
-          readout(96, "Searching", "…", palette.fgMuted);
+        if (showSearch) {
+          readout(20, "Nodes expanded", String(expandedCount), VISITED);
+          readout(58, "Frontier size", String(openCount), FRONTIER);
+          if (showPath && ev.reachedGoal) {
+            readout(96, "Path cost", String(search.goalCost), FRONTIER);
+          } else if (ev.reachedGoal) {
+            readout(96, "Reached goal", "✓", VISITED);
+          } else {
+            readout(96, "Searching", "…", palette.fgMuted);
+          }
         }
 
-        // Position the complexity equation overlay just under the title block.
+        // Position the complexity equation overlay just under the title block;
+        // its visibility is gated to P3 via eqEl.style.opacity.
         eqEl.style.left = `${PAD_SIDE}px`;
         eqEl.style.top = `${H - PAD_BOTTOM + 56}px`;
 
-        // ── legend (bottom-left) ──
+        // ── legend (bottom-left) — goal/wall always (they're on the bare grid);
+        // frontier/visited only once the search is unfolding (P1+) ──
         const legendY = H - PAD_BOTTOM + 24;
         const legendItem = (lx: number, col: RGB, txt: string) => {
           p.push();
@@ -648,8 +686,10 @@ const sim: Sim = {
           return lx + 18 + txt.length * 7.0 + 26;
         };
         let lx = PAD_SIDE;
-        lx = legendItem(lx, FRONTIER, "frontier");
-        lx = legendItem(lx, VISITED, "visited");
+        if (showSearch) {
+          lx = legendItem(lx, FRONTIER, "frontier");
+          lx = legendItem(lx, VISITED, "visited");
+        }
         lx = legendItem(lx, palette.terracotta, "goal");
         legendItem(lx, WALL, "wall");
 
@@ -670,13 +710,13 @@ const sim: Sim = {
     return {
       setPhase: (phaseIndex: number) => {
         phase = Math.max(0, Math.min(PHASE_COUNT - 1, Math.floor(phaseIndex)));
-        // Beats 2/3 should show the completed search immediately rather than
-        // waiting for the cursor to walk there; jump it forward (never back
-        // past where the animation already is for beat 1).
+        // P2/P3 should land on the completed search immediately rather than
+        // waiting for the cursor to walk there; jump it to the goal event. P0/P1
+        // keep their walked cursor so the frontier animates as the beat plays.
         const target = phaseTarget(phase);
         if (phase >= 2) cursor = target;
-        if (phase >= 3) pathT = 0; // re-trace the path on this beat
-        if (phase < 2) pathT = 0;
+        pathT = 0; // (re)trace the path from scratch whenever the beat changes
+        updateEquationVisibility(); // equation reveals only at P3
       },
       setParam: (key: string, value: number) => {
         if (!(key in params)) return;

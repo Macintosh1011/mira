@@ -19,8 +19,18 @@
  *   - Maxwell-Boltzmann speed PDF in 2D:  f(v) ∝ v·exp(−v²/2σ²),  σ = s/√2.
  *   - Diffusion signature:  ⟨r²⟩ ~ Dt  ⇒  spreading front ~ √t.
  *
+ * It unfolds like a video, NOT a sandbox that snaps to equilibrium. The sim
+ * clock is GATED BY PHASE: physics only integrates up to the current beat's
+ * target sim-time, then HOLDS. So at "release" the door has only just opened and
+ * a handful of particles have crossed; the gas reaches uniform only at the final
+ * beat. Every annotation is likewise gated — a bare confined box at phase 0, the
+ * position histogram once spreading begins, the speed histogram + analytic
+ * Maxwell-Boltzmann curve + equilibrium readouts + equation only at the end.
+ *
  * setPhase beats (1:1 with narration cues):
- *   0 confined · 1 release (partition eases open) · 2 spreading · 3 equilibrium.
+ *   0 confined (door shut, still + dense) · 1 release (door eases open, a few
+ *   cross) · 2 spreading (position histogram fills) · 3 equilibrium (uniform +
+ *   settled Maxwell-Boltzmann speed curve + ½m⟨v²⟩=k_BT + mean-speed/T readouts).
  * Live controls: count · temperature · particleSize · partitionOpen — all are
  * applied immediately by setParam (temperature rescales velocities in place;
  * count reseeds; size + partitionOpen are read live in draw).
@@ -124,6 +134,20 @@ const sim: Sim = {
     let phase = 0;
     const releaseEnv = { v: 0 };
     let releaseTween: { kill: () => void } | null = null;
+
+    // ── sim clock, GATED BY PHASE ─────────────────────────────────────────
+    // Physics only integrates up to the current beat's target sim-time, then
+    // holds — so the gas spreads WITH the narration instead of snapping to
+    // equilibrium. simSeconds is real integrated sim-time (sum of fixed steps).
+    let simSeconds = 0;
+    let phaseStartSeconds = 0; // simSeconds when the current beat began (for reveals)
+    // Diffusion is ~√t, so it needs real time to traverse the box. These targets
+    // are tuned so phase 1 reads as "the door just opened" (only a sliver of
+    // mixing), phase 2 as visible spreading, and phase 3 as settled uniform.
+    const PHASE_TARGET_SECONDS = [0.0, 1.4, 6.0, 1e9];
+    const phaseTargetSeconds = (): number =>
+      PHASE_TARGET_SECONDS[Math.min(phase, PHASE_TARGET_SECONDS.length - 1)];
+    const beatElapsed = (): number => simSeconds - phaseStartSeconds;
 
     // ── particle state (typed arrays for the hot loop) ────────────────────
     const MAX = CONTROLS[0].max;
@@ -437,24 +461,33 @@ const sim: Sim = {
 
       p.draw = () => {
         // Fixed-step physics for determinism + stability; clamp dt so a stalled
-        // tab doesn't explode the integrator, and cap sub-steps per frame.
+        // tab doesn't explode the integrator, and cap sub-steps per frame. The
+        // clock is gated: we only integrate while simSeconds is below the
+        // current beat's target, so the gas advances ONE beat at a time and
+        // holds — the diffusion unfolds like a video, never snapping to uniform.
         const dtReal = Math.min(0.05, (p.deltaTime || 16.7) / 1000);
-        accTime += dtReal;
         const SUB = 0.008;
-        let budget = 3;
-        while (accTime >= SUB && budget-- > 0) {
-          step(SUB);
-          accTime -= SUB;
-        }
-        if (accTime > SUB) accTime = 0;
+        const target = phaseTargetSeconds();
+        if (simSeconds < target) {
+          accTime += dtReal;
+          let budget = 3;
+          while (accTime >= SUB && budget-- > 0 && simSeconds < target) {
+            step(SUB);
+            simSeconds += SUB;
+            accTime -= SUB;
+          }
+          if (accTime > SUB) accTime = 0;
 
-        for (let k = 0; k < tracerIdx.length; k++) {
-          const j = tracerIdx[k];
-          const buf = trail[k];
-          buf[trailHead * 2] = px[j];
-          buf[trailHead * 2 + 1] = py[j];
+          // Advance tracer trails only while the sim is actually running, so a
+          // held beat shows still trails rather than a frozen point smearing.
+          for (let k = 0; k < tracerIdx.length; k++) {
+            const j = tracerIdx[k];
+            const buf = trail[k];
+            buf[trailHead * 2] = px[j];
+            buf[trailHead * 2 + 1] = py[j];
+          }
+          trailHead = (trailHead + 1) % TRAIL_LEN;
         }
-        trailHead = (trailHead + 1) % TRAIL_LEN;
 
         computeStats();
 
@@ -465,10 +498,19 @@ const sim: Sim = {
         drawParticles(p, L);
         drawTracerTrails(p, L);
         drawPartition(p, L);
+        // Annotations are gated by phase — bare confined box first, the panel
+        // and readouts reveal at their beats.
         drawHistograms(p, L);
         drawReadouts(p);
-        if (eqEl) eqEl.style.opacity = gapFraction() > 0.5 ? "1" : "0.7";
-        else drawEqnFallback(p, L);
+        // Equation: hidden while confined, fades in as the door opens (phase 1),
+        // full opacity only at equilibrium. The DOM overlay is the single clean
+        // KaTeX render; the canvas fallback only runs if KaTeX is unavailable.
+        if (eqEl) {
+          eqEl.style.opacity =
+            phase <= 0 ? "0" : phase >= PHASE_COUNT - 1 ? "1" : "0.7";
+        } else if (phase >= 1) {
+          drawEqnFallback(p, L);
+        }
 
         kit.phaseDots(p, {
           x: L.boxX,
@@ -571,24 +613,37 @@ const sim: Sim = {
     }
 
     function drawHistograms(p: P5, L: Layout): void {
+      // Phase 0/1: no panel. The focal element is the confined box (P0) / the
+      // door opening (P1) — keep the right side empty so the eye stays on it.
+      if (phase < 2) return;
+
       const colTop = L.boxY;
       const hGap = 58;
-      const hH = (L.boxH - hGap) / 2;
+      // Phase 2 shows only the position histogram (full panel height); the speed
+      // distribution + Maxwell-Boltzmann appear only at equilibrium (phase 3).
+      const showSpeed = phase >= PHASE_COUNT - 1;
+      const hH = showSpeed ? (L.boxH - hGap) / 2 : L.boxH;
       const ax = L.panelX + 8;
       const aw = L.panelW - 14;
 
-      // ── x-position histogram (the entropy headline) ──
+      // ── x-position histogram (the entropy headline; fades in over phase 2) ──
+      const posReveal = ease.smoothstep(clamp01((simSeconds - PHASE_TARGET_SECONDS[1]) / 1.2));
       kit.label(p, { x: ax, y: colTop - 18, text: "POSITION DISTRIBUTION", size: 10, upper: true, mono: true, color: palette.fgMuted, align: "left" });
       kit.label(p, { x: ax + aw, y: colTop - 18, text: (uniformity() * 100).toFixed(0) + "% MIXED", size: 11, mono: true, weight: "bold", color: AMBER, align: "right" });
       kit.axesPro(p, { x: ax, y: colTop, w: aw, h: hH, xMin: 0, xMax: 1, yMin: 0, yMax: 1, ticks: 4, xLabel: "Position x", decimals: 1, color: palette.fgMuted });
-      drawHistBars(p, ax, colTop, aw, hH, xHistSmooth, X_BINS, AMBER);
+      drawHistBars(p, ax, colTop, aw, hH, xHistSmooth, X_BINS, AMBER, posReveal);
       drawDashedMarker(p, ax + PART_X * aw, colTop, hH); // partition line
 
-      // ── speed histogram + Maxwell-Boltzmann overlay ──
+      if (!showSpeed) return;
+
+      // ── speed histogram + Maxwell-Boltzmann overlay (equilibrium beat) ──
       const sy = colTop + hH + hGap;
+      // Settle the M-B curve in as the equilibrium beat lands rather than from
+      // frame one, so it reads as "the distribution has now relaxed to this".
+      const eqReveal = ease.smoothstep(clamp01(beatElapsed() / 1.0));
       kit.label(p, { x: ax, y: sy - 18, text: "SPEED DISTRIBUTION", size: 10, upper: true, mono: true, color: palette.fgMuted, align: "left" });
       kit.axesPro(p, { x: ax, y: sy, w: aw, h: hH, xMin: 0, xMax: 1, yMin: 0, yMax: 1, ticks: 4, xLabel: "Speed |v|", decimals: 1, color: palette.fgMuted });
-      drawHistBars(p, ax, sy, aw, hH, speedHistSmooth, SPEED_BINS, TEAL);
+      drawHistBars(p, ax, sy, aw, hH, speedHistSmooth, SPEED_BINS, TEAL, eqReveal);
       kit.plot(p, {
         x: ax,
         y: sy,
@@ -599,7 +654,7 @@ const sim: Sim = {
         xMax: 1,
         yMin: 0,
         yMax: 1,
-        drawProgress: 0.4 + 0.6 * ease.smoothstep(clamp01(gapFraction())),
+        drawProgress: 0.3 + 0.7 * eqReveal,
         color: AMBER,
         head: false,
         weight: 1.5,
@@ -618,15 +673,15 @@ const sim: Sim = {
       });
     }
 
-    function drawHistBars(p: P5, x: number, y: number, w: number, h: number, hist: Float32Array, bins: number, color: RGB): void {
+    function drawHistBars(p: P5, x: number, y: number, w: number, h: number, hist: Float32Array, bins: number, color: RGB, reveal = 1): void {
       const bw = w / bins;
       p.push();
       p.noStroke();
       for (let i = 0; i < bins; i++) {
         const v = clamp01(hist[i]);
-        const bh = v * (h - 4);
+        const bh = v * (h - 4) * reveal;
         if (bh < 0.5) continue;
-        kit.fill(p, color, 0.28 + 0.5 * v);
+        kit.fill(p, color, (0.28 + 0.5 * v) * reveal);
         p.rect(x + i * bw + 1, y + h - bh, bw - 2, bh, 2);
       }
       p.pop();
@@ -644,12 +699,24 @@ const sim: Sim = {
     }
 
     function drawReadouts(p: P5): void {
+      // Gated by phase. P0/P1: nothing (the box is the whole story). P2: the
+      // spreading measurements — how many particles, what share have crossed
+      // into the right half. P3: the equilibrium thermal readouts (Temperature
+      // + Mean Speed) join, since those only mean something once thermalized.
+      if (phase < 2) return;
       const ry = 32;
       const rx = W - 30;
-      kit.readout(p, { x: rx, y: ry, label: "Temperature", value: params.temperature, unit: "T", decimals: 1, size: 18, align: "right", color: AMBER });
-      kit.readout(p, { x: rx - 156, y: ry, label: "Mean Speed", value: meanSpeed * 100, decimals: 1, size: 18, align: "right", color: TEAL });
-      kit.readout(p, { x: rx - 312, y: ry, label: "Particles", value: String(n), size: 18, align: "right", color: palette.fg });
-      kit.readout(p, { x: rx - 430, y: ry, label: "Right %", value: (rightFrac * 100).toFixed(0) + "%", size: 18, align: "right", color: palette.fg });
+      let cx = rx;
+      const final = phase >= PHASE_COUNT - 1;
+      if (final) {
+        kit.readout(p, { x: cx, y: ry, label: "Temperature", value: params.temperature, unit: "T", decimals: 1, size: 18, align: "right", color: AMBER });
+        cx -= 156;
+        kit.readout(p, { x: cx, y: ry, label: "Mean Speed", value: meanSpeed * 100, decimals: 1, size: 18, align: "right", color: TEAL });
+        cx -= 156;
+      }
+      kit.readout(p, { x: cx, y: ry, label: "Particles", value: String(n), size: 18, align: "right", color: palette.fg });
+      cx -= 118;
+      kit.readout(p, { x: cx, y: ry, label: "Right %", value: (rightFrac * 100).toFixed(0) + "%", size: 18, align: "right", color: palette.fg });
     }
 
     function drawEqnFallback(p: P5, L: Layout): void {
@@ -671,7 +738,26 @@ const sim: Sim = {
       setPhase(idx: number) {
         const next = Math.max(0, Math.min(PHASE_COUNT - 1, Math.floor(idx)));
         if (next === phase) return;
+        const goingBack = next < phase;
         phase = next;
+        phaseStartSeconds = simSeconds;
+
+        // Scrubbing back to "confined" reseeds the box so the demo replays the
+        // full diffusion from a cold start rather than from a mixed state.
+        if (next === 0) {
+          simSeconds = 0;
+          phaseStartSeconds = 0;
+          accTime = 0;
+          releaseEnv.v = 0;
+          seed();
+        } else if (goingBack) {
+          // Scrubbing back to an earlier (already-passed) beat: clamp the clock
+          // to that beat's window so the gas isn't more mixed than the beat.
+          const cap = PHASE_TARGET_SECONDS[next];
+          if (simSeconds > cap) simSeconds = cap;
+          phaseStartSeconds = Math.min(phaseStartSeconds, simSeconds);
+        }
+
         releaseTween?.kill();
         const target = next >= 1 ? 1 : 0;
         const gsap = libs.gsap;
@@ -698,6 +784,10 @@ const sim: Sim = {
           if (newN !== n) {
             n = newN;
             seed();
+            // Reseed restarts from confined; rewind the clock to the start of
+            // the current beat so the gas re-spreads up to where the beat is.
+            simSeconds = phaseStartSeconds = phase === 0 ? 0 : PHASE_TARGET_SECONDS[1];
+            accTime = 0;
           }
         } else if (k === "temperature" && v !== prev) {
           rescaleToTemperature();

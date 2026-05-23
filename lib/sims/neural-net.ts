@@ -1,8 +1,28 @@
 /**
  * Mira interactive Sim — Neural Net & Attention.
  *
- * A LITERAL, deterministic forward-pass / attention simulation. Two modes,
- * switched live by the `mode` control:
+ * A LITERAL, deterministic forward-pass / attention simulation that UNFOLDS
+ * LIKE A VIDEO: the forward pass / attention propagates one stage per phase
+ * beat instead of lighting the whole network and deciding the output at once.
+ *
+ *   P0  input only          — the 8×8 pixel grid (or the token column). Nothing
+ *                             else is on screen: no edges, no layers, no
+ *                             equation, no decision.
+ *   P1  first hidden layer  — activations propagate from the input; the input→H1
+ *                             bundle + the strongest weighted edges light. The
+ *                             input grid is now settled.
+ *   P2  deeper layer + math — the signal flows forward into H2; the governing
+ *                             equation (ReLU·softmax / attention) fades in here,
+ *                             gated by phase, never before.
+ *   P3  the decision        — the softmax bars over the 10 classes draw on, the
+ *                             argmax winner is highlighted, and the confidence %
+ *                             readout lands. ONLY here is the answer revealed.
+ *
+ * Each beat owns a phase clock (seconds since the beat started) that drives the
+ * freshly-revealed elements' `reveal` 0→1 so the stage propagates on-screen
+ * rather than snapping in; earlier stages stay settled at reveal=1.
+ *
+ * Two modes, switched live by the `mode` control:
  *
  *   Mode A — CLASSIFIER. An 8×8 input grid (a preset "drawn" digit) feeds two
  *   hidden layers of neurons over weighted edges. The forward pass is REAL:
@@ -324,7 +344,12 @@ interface SimState {
   temperature: number;
   layer: number;
   weightNoise: number;
+  /** Wall-clock ms when the current phase began (drives the reveal animation). */
+  phaseStartMs: number;
 }
+
+// Seconds a freshly-revealed stage takes to propagate fully on-screen.
+const REVEAL_SECONDS = 0.62;
 
 export const NeuralNetSim: Sim = {
   id: "neural-net",
@@ -357,9 +382,24 @@ export const NeuralNetSim: Sim = {
       temperature: clampRange(init.temperature, 0.2, 4),
       layer: clampInt(init.layer, 0, 3),
       weightNoise: clamp01(init.weightNoise),
+      phaseStartMs:
+        typeof performance !== "undefined" ? performance.now() : Date.now(),
     };
 
+    // Reveal progress 0..1 for elements that FIRST appear at `appearPhase`.
+    // The element animates in on the beat it appears, then stays at 1 for every
+    // later beat (settled). Returns 0 before its beat so nothing leaks early.
+    function revealFor(appearPhase: number, nowMs: number): number {
+      if (state.phase < appearPhase) return 0;
+      if (state.phase > appearPhase) return 1;
+      const elapsed = (nowMs - state.phaseStartMs) / 1000;
+      return clamp01(elapsed / REVEAL_SECONDS);
+    }
+
     // ── KaTeX equation overlay (HTML, positioned over the canvas) ────────
+    // Gated by phase: hidden until P2, where the governing law fades in. The
+    // single source equation is rendered once per (mode) and revealed via
+    // opacity, never drawn on the canvas.
     if (!container.style.position) container.style.position = "relative";
     const eqEl = document.createElement("div");
     eqEl.setAttribute("data-sim", "neural-net-eq");
@@ -367,7 +407,7 @@ export const NeuralNetSim: Sim = {
       position: "absolute",
       top: "14px",
       left: "50%",
-      transform: "translateX(-50%)",
+      transform: "translateX(-50%) translateY(8px)",
       padding: "8px 16px",
       borderRadius: "10px",
       background: "rgba(20,20,24,0.72)",
@@ -379,6 +419,8 @@ export const NeuralNetSim: Sim = {
       whiteSpace: "nowrap",
       maxWidth: "92%",
       overflow: "hidden",
+      opacity: "0",
+      transition: "opacity 520ms cubic-bezier(0.16,1,0.3,1), transform 520ms cubic-bezier(0.16,1,0.3,1)",
     } as Partial<CSSStyleDeclaration>);
     container.appendChild(eqEl);
 
@@ -387,7 +429,12 @@ export const NeuralNetSim: Sim = {
       String.raw`a^{(l)}=\mathrm{ReLU}\!\left(W^{(l)}a^{(l-1)}+b^{(l)}\right)\qquad \sigma(z)_i=\dfrac{e^{z_i/T}}{\sum_j e^{z_j/T}}`;
     const ATTENTION_EQ = String.raw`\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\!\left(\dfrac{QK^{\top}}{\sqrt{d_k}}\right)V`;
 
+    // The mode the equation HTML currently holds (avoids re-rendering KaTeX
+    // every visibility toggle; only re-render when the mode actually changes).
+    let eqMode = -1;
     function renderEquation(): void {
+      if (eqMode === state.mode) return;
+      eqMode = state.mode;
       const src = state.mode === 1 ? ATTENTION_EQ : CLASSIFIER_EQ;
       try {
         eqEl.innerHTML = libs.katex.renderToString(src, {
@@ -398,7 +445,17 @@ export const NeuralNetSim: Sim = {
         eqEl.textContent = src;
       }
     }
-    renderEquation();
+
+    // Reveal the equation only from the "deeper layer" beat (P2) onward.
+    function syncEquation(): void {
+      const show = state.phase >= 2;
+      if (show) renderEquation();
+      eqEl.style.opacity = show ? "1" : "0";
+      eqEl.style.transform = show
+        ? "translateX(-50%) translateY(0)"
+        : "translateX(-50%) translateY(8px)";
+    }
+    syncEquation();
 
     // ── derived model state, recomputed on any param change ──────────────
     let cls: ClassifierWeights = buildClassifier(state.weightNoise);
@@ -465,6 +522,8 @@ export const NeuralNetSim: Sim = {
 
       p.draw = () => {
         const tSec = p.millis() / 1000;
+        const nowMs =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
         kit.grid(p);
 
         const sc = Math.min(W / VW, Hpx / VH);
@@ -472,8 +531,8 @@ export const NeuralNetSim: Sim = {
         p.translate(W / 2 - (VW * sc) / 2, Hpx / 2 - (VH * sc) / 2);
         p.scale(sc);
 
-        if (state.mode === 1) drawAttention(tSec);
-        else drawClassifier(tSec);
+        if (state.mode === 1) drawAttention(tSec, nowMs);
+        else drawClassifier(tSec, nowMs);
 
         p.pop();
 
@@ -487,22 +546,33 @@ export const NeuralNetSim: Sim = {
       };
 
       // ── CLASSIFIER renderer ─────────────────────────────────────────────
-      function drawClassifier(tSec: number): void {
+      // Gated strictly by phase so the forward pass unfolds like a video:
+      //   P0 input only · P1 H1 fires · P2 H2 fires + equation · P3 the decision.
+      // Each freshly-revealed stage animates in on its own beat clock; the
+      // `layer` control can additionally hold back signal propagation live.
+      function drawClassifier(tSec: number, nowMs: number): void {
         const phase = state.phase;
         const lyr = state.layer;
+
+        // Per-stage reveal progress (0 before its beat, animates in on its beat).
+        const rIn = revealFor(0, nowMs); // input grid scans in at P0
+        const rH1 = revealFor(1, nowMs); // first hidden layer at P1
+        const rH2 = revealFor(2, nowMs); // deeper layer at P2
+        const rOut = revealFor(3, nowMs); // the decision at P3
 
         const a1max = Math.max(1e-6, ...pass.a1.map((v) => Math.abs(v)));
         const a2max = Math.max(1e-6, ...pass.a2.map((v) => Math.abs(v)));
 
-        // base edge bundles (faint, under neurons)
-        if (phase >= 1) kit.connectBundle(p, { from: [gridExit], to: h1Pts, inset: 12, reveal: 1 });
-        if (phase >= 2) kit.connectBundle(p, { from: h1Pts, to: h2Pts, reveal: 1 });
-        if (phase >= 3) kit.connectBundle(p, { from: h2Pts, to: outPts, reveal: 1 });
+        // base edge bundles (faint, under neurons) — each appears with its stage
+        if (phase >= 1) kit.connectBundle(p, { from: [gridExit], to: h1Pts, inset: 12, reveal: rH1 });
+        if (phase >= 2) kit.connectBundle(p, { from: h1Pts, to: h2Pts, reveal: rH2 });
+        if (phase >= 3) kit.connectBundle(p, { from: h2Pts, to: outPts, reveal: rOut });
 
-        // weighted signal edges: strongest firing connections light up
+        // weighted signal edges: strongest firing connections light up, scaled by
+        // the stage's reveal so the signal visibly flows forward into the layer.
         if (phase >= 1 && lyr >= 1) {
           topK(pass.a1, 6).forEach((i) => {
-            const w = clamp01(pass.a1[i] / a1max);
+            const w = clamp01(pass.a1[i] / a1max) * rH1;
             weightedSignal(gridExit.x + 6, gridExit.y, h1Pts[i].x - 12, h1Pts[i].y, tSec, w, +1);
           });
         }
@@ -517,7 +587,7 @@ export const NeuralNetSim: Sim = {
                 best = i;
               }
             }
-            const w = clamp01(pass.a2[j] / a2max);
+            const w = clamp01(pass.a2[j] / a2max) * rH2;
             weightedSignal(h1Pts[best].x + 12, h1Pts[best].y, h2Pts[j].x - 12, h2Pts[j].y, tSec, w, Math.sign(cls.w2[j][best]) || 1);
           });
         }
@@ -532,18 +602,19 @@ export const NeuralNetSim: Sim = {
                 best = j;
               }
             }
-            const w = clamp01(pass.probs[cl] / Math.max(1e-6, pass.probs[pass.winner]));
+            const w = clamp01(pass.probs[cl] / Math.max(1e-6, pass.probs[pass.winner])) * rOut;
             weightedSignal(h2Pts[best].x + 12, h2Pts[best].y, outPts[cl].x - 12, outPts[cl].y, tSec, w, Math.sign(cls.w3[cl][best]) || 1);
           });
         }
 
-        // input grid
+        // input grid — present at every beat; scans in at P0, settles after.
         const digit = DIGITS[state.input];
-        kit.pixelGrid(p, { x: gridX, y: gridY, cell, data: digit, reveal: 1, frame: true });
-        kit.label(p, { x: gridCx, y: gridY - 18, text: "x ∈ ℝ⁶⁴", size: 11, upper: true, mono: true, color: palette.fgMuted });
-        kit.label(p, { x: gridCx, y: gridY + gridW + 36, text: "Input · 8×8 pixels", size: 13, weight: "bold" });
+        kit.pixelGrid(p, { x: gridX, y: gridY, cell, data: digit, reveal: rIn, frame: true });
+        kit.label(p, { x: gridCx, y: gridY - 18, text: "x ∈ ℝ⁶⁴", size: 11, upper: true, mono: true, color: palette.fgMuted, alpha: rIn });
+        kit.label(p, { x: gridCx, y: gridY + gridW + 36, text: "Input · 8×8 pixels", size: 13, weight: "bold", alpha: rIn });
 
-        // hidden layer 1
+        // hidden layer 1 — first to fire (P1). Active while it's the live beat,
+        // settled once the signal has moved deeper.
         if (phase >= 1) {
           const lit = pass.a1.map((v) => v > 0.01);
           kit.neuronLayer(p, {
@@ -554,10 +625,10 @@ export const NeuralNetSim: Sim = {
             settled: lit.map((on) => on && phase > 1),
             title: "Hidden Layer 1",
             sublabel: "edge detectors · ReLU",
-            reveal: 1,
+            reveal: rH1,
           });
         }
-        // hidden layer 2
+        // hidden layer 2 — fires only once the signal reaches it (P2).
         if (phase >= 2) {
           const lit = pass.a2.map((v) => v > 0.01);
           kit.neuronLayer(p, {
@@ -568,10 +639,11 @@ export const NeuralNetSim: Sim = {
             settled: lit.map((on) => on && phase > 2),
             title: "Hidden Layer 2",
             sublabel: "shape composition · ReLU",
-            reveal: 1,
+            reveal: rH2,
           });
         }
-        // output layer + softmax bars
+        // output layer + softmax bars + the verdict — ONLY at the final beat (P3).
+        // The winner and confidence% are revealed here and nowhere earlier.
         if (phase >= 3) {
           const order = [...pass.probs.keys()].sort((a, b) => pass.probs[b] - pass.probs[a]);
           outPts.forEach((nn, i) => {
@@ -583,30 +655,37 @@ export const NeuralNetSim: Sim = {
               label: String(i),
               winner,
               settled: !winner && order.indexOf(i) <= 2,
-              reveal: 1,
+              reveal: rOut,
             });
             kit.confidenceBar(p, {
               x: nn.x + 30,
               y: nn.y,
               w: 120,
-              value: pass.probs[i],
+              // Bars grow on the P3 clock so the softmax distribution fills in.
+              value: pass.probs[i] * rOut,
               color: winner ? ACTIVE : palette.fgMuted,
               showPct: true,
             });
           });
-          kit.label(p, { x: 1240, y: 108, text: "Output", size: 13, weight: "bold" });
-          kit.label(p, { x: 1240, y: 126, text: "softmax · 10 classes", size: 11, upper: true, mono: true, color: palette.fgMuted });
+          kit.label(p, { x: 1240, y: 108, text: "Output", size: 13, weight: "bold", alpha: rOut });
+          kit.label(p, { x: 1240, y: 126, text: "softmax · 10 classes", size: 11, upper: true, mono: true, color: palette.fgMuted, alpha: rOut });
 
-          kit.label(p, { x: 1330, y: 770, text: "predicted: " + pass.winner, size: 17, weight: "bold", color: ACTIVE });
-          kit.label(p, {
-            x: 1330,
-            y: 796,
-            text: "confidence " + (pass.probs[pass.winner] * 100).toFixed(1) + "%  ·  T=" + state.temperature.toFixed(1),
-            size: 11,
-            upper: true,
-            mono: true,
-            color: palette.fgMuted,
-          });
+          // The decision lands last: hold it back until the bars have mostly
+          // filled so the readout reads as the verdict, not a spoiler.
+          const verdict = clamp01((rOut - 0.55) / 0.45);
+          if (verdict > 0.01) {
+            kit.label(p, { x: 1330, y: 770, text: "predicted: " + pass.winner, size: 17, weight: "bold", color: ACTIVE, alpha: verdict });
+            kit.label(p, {
+              x: 1330,
+              y: 796,
+              text: "confidence " + (pass.probs[pass.winner] * 100).toFixed(1) + "%  ·  T=" + state.temperature.toFixed(1),
+              size: 11,
+              upper: true,
+              mono: true,
+              color: palette.fgMuted,
+              alpha: verdict,
+            });
+          }
         }
       }
 
@@ -631,27 +710,35 @@ export const NeuralNetSim: Sim = {
       }
 
       // ── ATTENTION renderer ──────────────────────────────────────────────
-      function drawAttention(tSec: number): void {
+      // Same video-unfold gating as the classifier:
+      //   P0 tokens only · P1 query→key flows · P2 heatmap + equation ·
+      //   P3 the weighted-value output (the context vector lands here).
+      function drawAttention(tSec: number, nowMs: number): void {
         const phase = state.phase;
         const qi = clampInt(state.input, 0, n - 1);
 
-        // query token column (left)
-        kit.label(p, { x: tokColX, y: heatTop - 50, text: "Tokens", size: 13, weight: "bold" });
-        kit.label(p, { x: tokColX, y: heatTop - 32, text: "query selection", size: 11, upper: true, mono: true, color: palette.fgMuted });
+        const rTok = revealFor(0, nowMs); // token column at P0
+        const rFlow = revealFor(1, nowMs); // query→key flows at P1
+        const rHeat = revealFor(2, nowMs); // attention heatmap at P2
+        const rOut = revealFor(3, nowMs); // weighted-value output at P3
+
+        // query token column (left) — present from P0, fades in.
+        kit.label(p, { x: tokColX, y: heatTop - 50, text: "Tokens", size: 13, weight: "bold", alpha: rTok });
+        kit.label(p, { x: tokColX, y: heatTop - 32, text: "query selection", size: 11, upper: true, mono: true, color: palette.fgMuted, alpha: rTok });
         for (let i = 0; i < n; i++) {
-          tokenPill(tokColX, tokY(i), TOKENS[i], i === qi);
+          tokenPill(tokColX, tokY(i), TOKENS[i], i === qi, rTok);
         }
 
-        // attention heatmap (phase >= 2)
+        // attention heatmap (P2) — the matrix fills in on its beat clock.
         if (phase >= 2) {
-          kit.label(p, { x: heatX + (n * heatCellAtt) / 2, y: heatTop - 50, text: "Attention  A = softmax(QKᵀ/√dₖ)", size: 13, weight: "bold" });
-          kit.label(p, { x: heatX + (n * heatCellAtt) / 2, y: heatTop - 32, text: "rows = query · cols = key", size: 11, upper: true, mono: true, color: palette.fgMuted });
+          kit.label(p, { x: heatX + (n * heatCellAtt) / 2, y: heatTop - 50, text: "Attention  A = softmax(QKᵀ/√dₖ)", size: 13, weight: "bold", alpha: rHeat });
+          kit.label(p, { x: heatX + (n * heatCellAtt) / 2, y: heatTop - 32, text: "rows = query · cols = key", size: 11, upper: true, mono: true, color: palette.fgMuted, alpha: rHeat });
 
           for (let j = 0; j < n; j++) {
-            kit.label(p, { x: heatX + j * heatCellAtt + heatCellAtt / 2, y: heatTop - 12, text: TOKENS[j], size: 11, mono: true, color: palette.fgSubtle });
+            kit.label(p, { x: heatX + j * heatCellAtt + heatCellAtt / 2, y: heatTop - 12, text: TOKENS[j], size: 11, mono: true, color: palette.fgSubtle, alpha: rHeat });
           }
           for (let i = 0; i < n; i++) {
-            kit.label(p, { x: heatX - 16, y: tokY(i), text: TOKENS[i], size: 11, mono: true, align: "right", color: i === qi ? ACTIVE : palette.fgSubtle });
+            kit.label(p, { x: heatX - 16, y: tokY(i), text: TOKENS[i], size: 11, mono: true, align: "right", color: i === qi ? ACTIVE : palette.fgSubtle, alpha: rHeat });
             for (let j = 0; j < n; j++) {
               const a = att.attn[i][j];
               const cx = heatX + j * heatCellAtt;
@@ -660,73 +747,79 @@ export const NeuralNetSim: Sim = {
               const isRow = i === qi;
               p.push();
               p.noStroke();
-              p.fill(ACTIVE[0], ACTIVE[1], ACTIVE[2], clamp01(isRow ? a : a * 0.55) * 255);
+              p.fill(ACTIVE[0], ACTIVE[1], ACTIVE[2], clamp01(isRow ? a : a * 0.55) * rHeat * 255);
               p.rect(cx + 3, cy + 3, sz, sz, 4);
               p.noFill();
-              p.stroke(255, 255, 255, (isRow ? 0.16 : 0.06) * 255);
+              p.stroke(255, 255, 255, (isRow ? 0.16 : 0.06) * rHeat * 255);
               p.strokeWeight(1);
               p.rect(cx + 3, cy + 3, sz, sz, 4);
               p.pop();
               if (isRow) {
-                kit.label(p, { x: cx + 3 + sz / 2, y: cy + 3 + sz / 2, text: a.toFixed(2), size: 12, mono: true, weight: "bold", color: a > 0.45 ? palette.bg : palette.fg });
+                kit.label(p, { x: cx + 3 + sz / 2, y: cy + 3 + sz / 2, text: a.toFixed(2), size: 12, mono: true, weight: "bold", color: a > 0.45 ? palette.bg : palette.fg, alpha: rHeat });
               }
             }
           }
         }
 
-        // animated attention flows from query → keys (phase >= 1)
+        // animated attention flows from query → keys (P1). Before the heatmap
+        // exists they land on the token column; from P2 they aim at the matrix.
         if (phase >= 1) {
           for (let j = 0; j < n; j++) {
             const a = att.attn[qi][j];
             if (a < 0.04) continue;
             const x2 = phase >= 2 ? heatX + j * heatCellAtt + heatCellAtt / 2 : tokColX + 80;
             const y2 = phase >= 2 ? heatTop - 4 : tokY(j);
-            kit.signal(p, { x1: tokColX + 60, y1: tokY(qi), x2, y2, t: tSec, color: ACTIVE, reveal: clamp01(0.25 + a * 1.4) });
+            const flow = phase === 1 ? rFlow : 1;
+            kit.signal(p, { x1: tokColX + 60, y1: tokY(qi), x2, y2, t: tSec, color: ACTIVE, reveal: clamp01(0.25 + a * 1.4) * flow });
           }
         }
 
-        // weighted-sum output (phase >= 3)
+        // weighted-sum output (P3) — the context vector is the verdict, revealed
+        // only here. Bars grow on the P3 clock.
         if (phase >= 3) {
-          kit.label(p, { x: valColX, y: heatTop - 50, text: "Output  oᵢ = Σⱼ Aᵢⱼ Vⱼ", size: 13, weight: "bold" });
-          kit.label(p, { x: valColX, y: heatTop - 32, text: "weighted value sum", size: 11, upper: true, mono: true, color: palette.fgMuted });
+          kit.label(p, { x: valColX, y: heatTop - 50, text: "Output  oᵢ = Σⱼ Aᵢⱼ Vⱼ", size: 13, weight: "bold", alpha: rOut });
+          kit.label(p, { x: valColX, y: heatTop - 32, text: "weighted value sum", size: 11, upper: true, mono: true, color: palette.fgMuted, alpha: rOut });
           const out = att.out[qi];
           const omax = Math.max(1e-6, ...out.map((v) => Math.abs(v)));
           const barW = 150;
           for (let d = 0; d < D_K; d++) {
             const by = heatTop + 30 + d * 70;
             const v = out[d];
-            kit.label(p, { x: valColX - 70, y: by, text: "o[" + d + "]", size: 11, mono: true, align: "left", color: palette.fgMuted });
-            const frac = clamp01(Math.abs(v) / omax);
+            kit.label(p, { x: valColX - 70, y: by, text: "o[" + d + "]", size: 11, mono: true, align: "left", color: palette.fgMuted, alpha: rOut });
+            const frac = clamp01(Math.abs(v) / omax) * rOut;
             p.push();
             p.noStroke();
-            p.fill(255, 255, 255, 0.06 * 255);
+            p.fill(255, 255, 255, 0.06 * rOut * 255);
             p.rect(valColX, by - 5, barW, 10, 3);
             const col: RGB = v >= 0 ? ACTIVE : EDGE;
-            p.fill(col[0], col[1], col[2], 255);
+            p.fill(col[0], col[1], col[2], rOut * 255);
             p.rect(valColX, by - 5, barW * frac, 10, 3);
             p.pop();
-            kit.label(p, { x: valColX + barW + 16, y: by, text: v.toFixed(2), size: 11, mono: true, align: "left", color: v >= 0 ? ACTIVE : EDGE });
+            kit.label(p, { x: valColX + barW + 16, y: by, text: v.toFixed(2), size: 11, mono: true, align: "left", color: v >= 0 ? ACTIVE : EDGE, alpha: rOut });
           }
-          kit.label(p, { x: valColX + 40, y: heatTop + 30 + D_K * 70 + 12, text: "context vector for “" + TOKENS[qi] + "”", size: 12, weight: "bold", color: ACTIVE });
+          const verdict = clamp01((rOut - 0.55) / 0.45);
+          kit.label(p, { x: valColX + 40, y: heatTop + 30 + D_K * 70 + 12, text: "context vector for “" + TOKENS[qi] + "”", size: 12, weight: "bold", color: ACTIVE, alpha: verdict });
         }
       }
 
-      function tokenPill(x: number, y: number, text: string, selected: boolean): void {
+      function tokenPill(x: number, y: number, text: string, selected: boolean, reveal: number): void {
+        const a = clamp01(reveal);
+        if (a <= 0.01) return;
         const w = 120;
         const h = 40;
         p.push();
         if (selected) {
-          p.fill(ACTIVE[0], ACTIVE[1], ACTIVE[2], 0.16 * 255);
-          p.stroke(ACTIVE[0], ACTIVE[1], ACTIVE[2], 0.9 * 255);
+          p.fill(ACTIVE[0], ACTIVE[1], ACTIVE[2], 0.16 * a * 255);
+          p.stroke(ACTIVE[0], ACTIVE[1], ACTIVE[2], 0.9 * a * 255);
           p.strokeWeight(1.5);
         } else {
-          p.fill(palette.surface[0], palette.surface[1], palette.surface[2], 0.72 * 255);
-          p.stroke(255, 255, 255, 0.08 * 255);
+          p.fill(palette.surface[0], palette.surface[1], palette.surface[2], 0.72 * a * 255);
+          p.stroke(255, 255, 255, 0.08 * a * 255);
           p.strokeWeight(1);
         }
         p.rect(x - w / 2, y - h / 2, w, h, 10);
         p.pop();
-        kit.label(p, { x, y, text, size: 14, mono: true, weight: "bold", color: selected ? ACTIVE : palette.fg });
+        kit.label(p, { x, y, text, size: 14, mono: true, weight: "bold", color: selected ? ACTIVE : palette.fg, alpha: a });
       }
     };
 
@@ -735,7 +828,14 @@ export const NeuralNetSim: Sim = {
     // ── controller ────────────────────────────────────────────────────────
     return {
       setPhase(phaseIndex: number): void {
-        state.phase = clampInt(phaseIndex, 0, 3);
+        const next = clampInt(phaseIndex, 0, 3);
+        if (next !== state.phase) {
+          state.phase = next;
+          // Restart the beat clock so the newly-revealed stage animates in.
+          state.phaseStartMs =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
+          syncEquation();
+        }
       },
       setParam(key: string, value: number): void {
         if (!Number.isFinite(value)) return;
@@ -744,7 +844,7 @@ export const NeuralNetSim: Sim = {
             const m = value >= 0.5 ? 1 : 0;
             if (m !== state.mode) {
               state.mode = m;
-              renderEquation();
+              syncEquation();
               recompute();
             }
             break;

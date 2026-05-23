@@ -1,14 +1,19 @@
 /**
- * signal — a literal, interactive oscilloscope.
+ * signal — a literal, interactive oscilloscope that UNFOLDS like a video.
  *
- * One live scope trace (amber #efc540 on a #0c0c0e grid) rendering three real
- * electrical / biophysical phenomena, switchable via the `mode` control:
+ * The scope trace does not appear all at once. A single phase-gated sim clock
+ * advances real elapsed time but is CAPPED at the current narration beat's
+ * target window-fraction, so the trace physically draws itself across the scope
+ * as the beats progress — exactly like traffic-jam's wave and epidemic's SIR
+ * curve unfold WITH the narration instead of finishing instantly.
  *
- *   mode 0  RC CIRCUIT     a battery→resistor→capacitor schematic with current
- *                          flowing, and the capacitor voltage charging then
- *                          discharging on the scope:  V(t) = V₀(1 − e^{−t/RC})
- *                          then V(t) = V₀ e^{−t/RC}.  τ = RC moves visibly with
- *                          the R and C sliders.
+ * Three real signals, switchable via the `mode` control:
+ *
+ *   mode 0  RC CIRCUIT     a battery→resistor→capacitor schematic; the stimulus
+ *                          (current) begins flowing at beat 1, the capacitor
+ *                          voltage charges then discharges on the scope:
+ *                          V(t) = V₀(1 − e^{−t/RC}) then V₀ e^{−t/RC}. τ = RC
+ *                          moves visibly with the R and C sliders.
  *
  *   mode 1  FOURIER        odd harmonics summed into a square wave; each faint
  *                          harmonic (blue) plus the amber partial sum, which
@@ -19,15 +24,17 @@
  *                          hyperpolarized undershoot; below threshold it just
  *                          decays back to rest. `stimulus` is the injected knob.
  *
- * Controls: mode, R, C, numHarmonics, stimulus. setParam live-updates the trace.
- * Phases (cumulative): 0 scope frame · 1 governing equation + idle element ·
- * 2 live trace runs · 3 readouts (τ / frequency / peak) + legend.
+ * Phases (cumulative, gated):
+ *   P0  bare scope (graticule + axes) + the idle circuit element. Nothing drawn.
+ *   P1  governing equation appears + stimulus applied (current starts flowing);
+ *       the trace is only JUST beginning — no τ / frequency / peak readouts yet.
+ *   P2  the trace runs/builds live across the scope as the clock advances.
+ *   P3  the readouts (τ=RC / frequency / peak) + legend resolve.
  *
- * Deterministic given (phase, params, clock); the only mutable state is a
- * draw-to-draw clock that advances by real elapsed time so the sweep is smooth
- * but reproducible from identical inputs. dispose() removes the p5 canvas, the
- * katex equation overlay, and stops the loop. No removed p5 APIs: every curve is
- * sampled point-by-point with vertex() — no quadraticVertex/bezierVertex.
+ * Deterministic given (phase, params, clock). The only mutable state is the
+ * phase-gated clock; identical inputs render an identical frame. dispose()
+ * removes the p5 canvas + the KaTeX equation overlay and stops the loop. No
+ * removed p5 APIs: every curve is sampled point-by-point with vertex().
  */
 import type {
   Sim,
@@ -60,6 +67,13 @@ const AP_PEAK = 40;
 const AP_UNDERSHOOT = -80;
 const AP_STIM_THRESHOLD = 10; // µA needed to clear threshold
 
+// How much of the scope window the trace has filled at each beat. The clock is
+// capped to this fraction, so the trace is JUST beginning at P1 and finishes
+// only by the final beat — the whole point of the video-like unfold.
+const PHASE_WINDOW_FRAC = [0, 0.08, 1, 1] as const;
+// Seconds for the trace to sweep the full scope window once unlocked.
+const SWEEP_SECONDS = 4.2;
+
 const sim: Sim = {
   id: "signal",
   title: "Signal on a Scope",
@@ -73,8 +87,8 @@ const sim: Sim = {
     const { kit, katex } = libs;
     const { palette, ease, clamp01, lerp } = kit;
 
-    const AMBER = palette.accent; // #efc540 trace
-    const TEAL = palette.teal; // current / components
+    const AMBER = palette.accent; // #efc540 — focal signal only
+    const TEAL = palette.teal; // graticule / circuit components / current
     const BLUE = palette.blue; // harmonics / secondary
     const PINK = palette.pink; // threshold marker
     const MUTED = palette.fgMuted;
@@ -87,14 +101,27 @@ const sim: Sim = {
       numHarmonics: content.params?.numHarmonics ?? 5,
       stimulus: content.params?.stimulus ?? 14,
     };
+    const phaseCount = Math.max(1, content.phases.length || 4);
     let phase = 0;
-    let clock = 0; // seconds, advances by real elapsed time
+
+    // The single phase-gated clock. `traceClock` accumulates real elapsed time
+    // but only while it is below the current beat's target; it is the cause of
+    // the trace building. `dressClock` runs free for cosmetic motion (the
+    // flowing-current dashes) so the schematic feels alive even while paused.
+    let traceClock = 0; // seconds of trace swept, capped per phase
+    let dressClock = 0; // free-running, for current-flow animation
     let lastMs = 0;
 
-    // Per-phase reveal eases (0..1), advanced in draw toward 1 when unlocked.
+    // Per-phase reveal eases (0..1), advanced toward 1 when their beat unlocks.
+    // `frame` is the scope itself (always on); the rest gate strictly by beat.
     const reveals = { frame: 0, equation: 0, trace: 0, readout: 0 };
 
-    // ── katex equation overlay (kit has no equation primitive at runtime) ──
+    const phaseTargetClock = (): number => {
+      const f = PHASE_WINDOW_FRAC[Math.min(phase, PHASE_WINDOW_FRAC.length - 1)];
+      return f * SWEEP_SECONDS;
+    };
+
+    // ── KaTeX equation overlay (single clean equation, output:"html") ──────
     const eqEl = document.createElement("div");
     eqEl.style.position = "absolute";
     eqEl.style.pointerEvents = "none";
@@ -103,17 +130,15 @@ const sim: Sim = {
     eqEl.style.color = `rgb(${palette.fg[0]},${palette.fg[1]},${palette.fg[2]})`;
     eqEl.style.fontSize = "17px";
     eqEl.style.opacity = "0";
-    eqEl.style.transition = "opacity 120ms linear";
+    eqEl.style.transition = "opacity 160ms linear";
     eqEl.style.transformOrigin = "left top";
     eqEl.style.whiteSpace = "nowrap";
-    // The container hosts the p5 canvas; ensure children can be positioned.
     if (getComputedStyle(container).position === "static") {
       container.style.position = "relative";
     }
     container.appendChild(eqEl);
 
-    const EQ_RC =
-      "V(t)=V_0\\left(1-e^{-t/RC}\\right),\\quad \\tau=RC";
+    const EQ_RC = "V(t)=V_0\\left(1-e^{-t/RC}\\right)";
     const EQ_FOURIER =
       "f(t)=\\frac{4}{\\pi}\\sum_{k=1,3,5,\\dots}^{N}\\frac{\\sin(k\\omega t)}{k}";
     const EQ_AP =
@@ -129,11 +154,11 @@ const sim: Sim = {
           : mode === MODE_AP
             ? EQ_AP
             : EQ_RC;
-      // content.equation, when provided, overrides the per-mode default.
       const src = content.equation ?? latex;
       eqEl.innerHTML = katex.renderToString(src, {
-        displayMode: true,
-        throwOnError: false, output: "html",
+        throwOnError: false,
+        output: "html",
+        displayMode: false,
       });
     }
 
@@ -141,24 +166,26 @@ const sim: Sim = {
     function dims() {
       const W = container.clientWidth || 800;
       const H = container.clientHeight || 480;
-      // Scope occupies the lower-right; schematic / synthesis sits upper-left.
-      const pad = Math.max(28, Math.min(W, H) * 0.06);
       const scope = {
         x: W * 0.34,
         y: H * 0.26,
         w: W * 0.6,
         h: H * 0.5,
       };
-      return { W, H, pad, scope };
+      return { W, H, scope };
     }
 
-    // ── signal models (all return normalized 0..1 points for kit.plotLine) ─
-    // RC: charge for the first half of the window, discharge for the second.
-    function rcPoints(tau: number, windowS: number, n: number) {
+    // ── signal models (all return normalized 0..1 points for the scope) ────
+    // Each model takes a `frac` (0..1) = how much of the window is swept; it
+    // returns ONLY the points up to that fraction, so the trace is genuinely
+    // shorter at earlier beats (a real progressive build, not a clipped whole).
+    function rcPoints(tau: number, windowS: number, frac: number, n: number) {
       const pts: { x: number; y: number }[] = [];
       const half = windowS / 2;
+      const sweptT = clamp01(frac) * windowS;
       for (let i = 0; i <= n; i++) {
         const t = (i / n) * windowS;
+        if (t > sweptT) break;
         let v: number;
         if (t <= half) {
           v = 1 - Math.exp(-t / tau); // charging toward V0
@@ -166,78 +193,83 @@ const sim: Sim = {
           const vAtHalf = 1 - Math.exp(-half / tau);
           v = vAtHalf * Math.exp(-(t - half) / tau); // discharging
         }
-        pts.push({ x: i / n, y: clamp01(v) });
+        pts.push({ x: t / windowS, y: clamp01(v) });
       }
       return pts;
     }
 
-    // Fourier square wave from N odd harmonics; returns full series + each
-    // harmonic, all normalized to 0..1 with 0.5 as the zero line.
-    function fourierData(N: number, cyclesInWindow: number, n: number) {
-      const sum: { x: number; y: number }[] = [];
-      const harmonics: { x: number; y: number }[][] = [];
+    // Fourier square wave from N odd harmonics; returns the partial sum + each
+    // harmonic, all normalized to 0..1 with 0.5 as the zero line, sampled only
+    // up to the swept fraction.
+    function fourierData(
+      N: number,
+      cyclesInWindow: number,
+      frac: number,
+      n: number,
+    ) {
       const odds: number[] = [];
       for (let k = 1; odds.length < N; k += 2) odds.push(k);
-      odds.forEach(() => harmonics.push([]));
+      // Peak is computed over the FULL window so the vertical scale is stable
+      // as the trace grows (otherwise it would rescale every frame).
       let peak = 0;
       const raw: number[] = [];
       for (let i = 0; i <= n; i++) {
         const ph = (i / n) * cyclesInWindow * 2 * Math.PI;
         let s = 0;
-        odds.forEach((k, hi) => {
-          const term = (4 / Math.PI) * Math.sin(k * ph) / k;
-          s += term;
-          harmonics[hi].push({ x: i / n, y: term });
+        odds.forEach((k) => {
+          s += ((4 / Math.PI) * Math.sin(k * ph)) / k;
         });
         raw.push(s);
         peak = Math.max(peak, Math.abs(s));
       }
-      const scale = 0.42 / Math.max(peak, 1); // keep inside the box
-      for (let i = 0; i <= n; i++) {
-        sum.push({ x: i / n, y: clamp01(0.5 + raw[i] * scale) });
+      const scale = 0.42 / Math.max(peak, 1);
+      const cut = Math.floor(clamp01(frac) * n);
+      const sum: { x: number; y: number }[] = [];
+      const harmonics: { x: number; y: number }[][] = odds.map(() => []);
+      for (let i = 0; i <= cut; i++) {
+        const x = i / n;
+        sum.push({ x, y: clamp01(0.5 + raw[i] * scale) });
+        const ph = (i / n) * cyclesInWindow * 2 * Math.PI;
+        odds.forEach((k, hi) => {
+          const term = ((4 / Math.PI) * Math.sin(k * ph)) / k;
+          harmonics[hi].push({ x, y: clamp01(0.5 + term * scale) });
+        });
       }
-      const harmNorm = harmonics.map((h) =>
-        h.map((pt) => ({ x: pt.x, y: clamp01(0.5 + pt.y * scale) })),
-      );
-      return { sum, harmonics: harmNorm, odds };
+      return { sum, harmonics, odds };
     }
 
     // Action potential: a smooth deterministic spike triggered when stimulus
-    // clears threshold; otherwise a passive sub-threshold decay. Returns mV
-    // samples plus the normalization helper bounds.
-    function apData(stimulus: number, windowS: number, n: number) {
+    // clears threshold; otherwise a passive sub-threshold decay. Sampled only
+    // up to the swept fraction.
+    function apData(stimulus: number, windowS: number, frac: number, n: number) {
       const fires = stimulus >= AP_STIM_THRESHOLD;
       const tStim = windowS * 0.18; // when the current is injected
       const yMin = AP_UNDERSHOOT - 5;
       const yMax = AP_PEAK + 10;
-      const norm = (mv: number) =>
-        clamp01((mv - yMin) / (yMax - yMin));
+      const norm = (mv: number) => clamp01((mv - yMin) / (yMax - yMin));
+      const sweptT = clamp01(frac) * windowS;
       const pts: { x: number; y: number }[] = [];
       let peakMv = AP_REST;
       for (let i = 0; i <= n; i++) {
         const t = (i / n) * windowS;
+        if (t > sweptT) break;
         let mv = AP_REST;
         if (t < tStim) {
           mv = AP_REST;
         } else if (fires) {
-          // Phenomenological HH-shaped spike: fast rise, slower fall, undershoot.
           const u = (t - tStim) / (windowS - tStim); // 0..1 over remaining window
           const rise = Math.exp(-Math.pow((u - 0.06) / 0.05, 2)); // depolarize
           const fall = Math.exp(-Math.pow((u - 0.06) / 0.16, 2)); // repolarize tail
-          const under =
-            -Math.exp(-Math.pow((u - 0.34) / 0.18, 2)) * 1; // hyperpolarize dip
+          const under = -Math.exp(-Math.pow((u - 0.34) / 0.18, 2)); // dip
           const env = Math.max(rise, fall);
           const spike = (AP_PEAK - AP_REST) * env;
           const dip = (AP_REST - AP_UNDERSHOOT) * under;
-          // small stimulus-scaled foot before the all-or-none upstroke
           const foot =
             (AP_THRESHOLD - AP_REST) *
             Math.exp(-Math.pow((u - 0.0) / 0.03, 2)) *
             0.4;
           mv = AP_REST + spike + dip + foot;
         } else {
-          // Sub-threshold: charge toward a depolarization proportional to the
-          // stimulus, then decay — never reaching threshold.
           const u = (t - tStim) / (windowS - tStim);
           const bump =
             (stimulus / AP_STIM_THRESHOLD) *
@@ -248,12 +280,25 @@ const sim: Sim = {
           mv = AP_REST + Math.max(0, bump);
         }
         peakMv = Math.max(peakMv, mv);
-        pts.push({ x: i / n, y: norm(mv) });
+        pts.push({ x: t / windowS, y: norm(mv) });
       }
-      return { pts, fires, peakMv, norm };
+      // peakMv over the full window so the readout is stable once revealed.
+      let fullPeak = AP_REST;
+      for (let i = 0; i <= n; i++) {
+        const t = (i / n) * windowS;
+        if (!fires) break;
+        if (t < tStim) continue;
+        const u = (t - tStim) / (windowS - tStim);
+        const env = Math.max(
+          Math.exp(-Math.pow((u - 0.06) / 0.05, 2)),
+          Math.exp(-Math.pow((u - 0.06) / 0.16, 2)),
+        );
+        fullPeak = Math.max(fullPeak, AP_REST + (AP_PEAK - AP_REST) * env);
+      }
+      return { pts, fires, peakMv: fires ? fullPeak : peakMv, norm };
     }
 
-    // ── small drawing helpers ──────────────────────────────────────────
+    // ── scope-space helpers ─────────────────────────────────────────────
     function sx(scope: { x: number; w: number }, nx: number) {
       return scope.x + clamp01(nx) * scope.w;
     }
@@ -261,7 +306,9 @@ const sim: Sim = {
       return scope.y + scope.h - clamp01(ny) * scope.h;
     }
 
-    // Draw a normalized polyline manually with vertex() (no curve APIs).
+    // Draw a normalized polyline manually with vertex() (no curve APIs). The
+    // points are ALREADY truncated to the swept fraction, so the trace length
+    // is the real build state; `alpha` only controls reveal opacity.
     function drawTrace(
       p: P5,
       scope: { x: number; y: number; w: number; h: number },
@@ -269,10 +316,8 @@ const sim: Sim = {
       color: RGB,
       alpha: number,
       weight: number,
-      tDraw: number,
     ) {
       if (pts.length < 2 || alpha <= 0.01) return;
-      const cut = Math.max(1, Math.floor((pts.length - 1) * clamp01(tDraw)));
       p.push();
       p.noFill();
       p.stroke(color[0], color[1], color[2], alpha * 255);
@@ -280,20 +325,21 @@ const sim: Sim = {
       p.strokeCap(p.ROUND);
       p.strokeJoin(p.ROUND);
       p.beginShape();
-      for (let i = 0; i <= cut; i++) {
+      for (let i = 0; i < pts.length; i++) {
         p.vertex(sx(scope, pts[i].x), sy(scope, pts[i].y));
       }
       p.endShape();
       p.pop();
     }
 
-    function glowDot(p: P5, x: number, y: number, color: RGB) {
+    function glowDot(p: P5, x: number, y: number, color: RGB, alpha: number) {
+      if (alpha <= 0.01) return;
       p.noStroke();
       for (let i = 3; i >= 1; i--) {
-        p.fill(color[0], color[1], color[2], (0.18 * (4 - i)) * 255 * 0.25);
+        p.fill(color[0], color[1], color[2], 0.18 * (4 - i) * alpha * 255 * 0.25);
         p.circle(x, y, 6 + i * 5);
       }
-      p.fill(color[0], color[1], color[2], 255);
+      p.fill(color[0], color[1], color[2], alpha * 255);
       p.circle(x, y, 7);
     }
 
@@ -354,7 +400,9 @@ const sim: Sim = {
       });
     }
 
-    // ── RC schematic (battery → resistor → capacitor) with flowing current ─
+    // ── RC schematic (battery → resistor → capacitor) ───────────────────
+    // `flow` = is current flowing (stimulus applied)? Gated to P1+ so the
+    // element is idle at P0 and the stimulus visibly begins at the equation beat.
     function drawRcSchematic(
       p: P5,
       x: number,
@@ -370,11 +418,10 @@ const sim: Sim = {
       const top = y;
       const bot = y + h;
       const segs: { a: [number, number]; b: [number, number] }[] = [
-        { a: [left, top], b: [right, top] }, // top wire
-        { a: [right, top], b: [right, bot] }, // right wire down
-        { a: [right, bot], b: [left, bot] }, // bottom wire
+        { a: [left, top], b: [right, top] },
+        { a: [right, top], b: [right, bot] },
+        { a: [right, bot], b: [left, bot] },
       ];
-      // base wires
       p.push();
       p.stroke(TEAL[0], TEAL[1], TEAL[2], alpha * 0.55 * 255);
       p.strokeWeight(1.5);
@@ -391,7 +438,7 @@ const sim: Sim = {
       p.line(bx - 5, bcy + 4, bx + 5, bcy + 4); // short plate (−)
       p.pop();
 
-      // resistor (zigzag) on the top wire — sampled with line segments
+      // resistor (zigzag) on the top wire
       const rN = 7;
       const rL = right - left;
       const rx0 = left + rL * 0.32;
@@ -421,12 +468,11 @@ const sim: Sim = {
       p.line(ccx - 14, ccy + 8, ccx + 14, ccy + 8);
       p.pop();
 
-      // labels
       kit.label(p, { x: (rx0 + rx1) / 2, y: top - 20, text: "R", size: 14, color: TEAL, alpha, weight: "bold" });
       kit.label(p, { x: ccx + 28, y: ccy, text: "C", size: 14, align: "left", color: TEAL, alpha, weight: "bold" });
       kit.label(p, { x: bx - 22, y: bcy, text: "V₀", size: 13, align: "right", color: MUTED, alpha });
 
-      // flowing current dashes around the loop
+      // flowing current dashes around the loop — only when the stimulus is on
       if (flow) {
         const dotCount = 26;
         const perimPts: [number, number][] = [];
@@ -442,16 +488,26 @@ const sim: Sim = {
         const n = perimPts.length;
         p.noStroke();
         for (let i = 0; i < dotCount; i++) {
-          const f = ((i / dotCount + clock * 0.18) % 1) * n;
+          const f = ((i / dotCount + dressClock * 0.18) % 1) * n;
           const idx = Math.floor(f) % n;
           const a = 0.7 * (0.4 + 0.6 * Math.sin((i / dotCount) * Math.PI));
           p.fill(AMBER[0], AMBER[1], AMBER[2], a * alpha * 255);
           p.circle(perimPts[idx][0], perimPts[idx][1], 3.4);
         }
+        kit.label(p, {
+          x: (left + right) / 2,
+          y: bot + 16,
+          text: "i(t) →",
+          size: 10,
+          mono: true,
+          upper: true,
+          color: AMBER,
+          alpha,
+        });
       }
     }
 
-    // ── per-mode scope rendering ───────────────────────────────────────
+    // ── scope frame: teal graticule + axes (always on, P0+) ──────────────
     function drawScopeFrame(
       p: P5,
       scope: { x: number; y: number; w: number; h: number },
@@ -464,11 +520,11 @@ const sim: Sim = {
       p.fill(8, 8, 10, 0.9 * r * 255);
       p.rect(scope.x - 6, scope.y - 6, scope.w + 12, scope.h + 12, 6);
       p.pop();
-      // fine scope graticule
+      // fine teal graticule
       p.push();
       const cols = 10;
       const rows = 6;
-      p.stroke(TEAL[0], TEAL[1], TEAL[2], 0.07 * r * 255);
+      p.stroke(TEAL[0], TEAL[1], TEAL[2], 0.08 * r * 255);
       p.strokeWeight(1);
       for (let i = 1; i < cols; i++) {
         const gx = scope.x + (scope.w * i) / cols;
@@ -509,20 +565,31 @@ const sim: Sim = {
         );
 
       p.draw = () => {
-        // advance clock by real elapsed time (capped so a tab-switch can't jump)
         const now = p.millis();
         const dt = Math.min(0.05, Math.max(0, (now - lastMs) / 1000));
         lastMs = now;
-        clock += dt;
+        dressClock += dt;
 
-        // unlock reveals cumulatively by phase, ease toward 1
+        // Advance the phase-gated trace clock toward (and capped at) this
+        // beat's target. P0 holds it at 0 (empty scope); each later beat lets
+        // it run a little (P1) or all the way (P2/P3) across the window.
+        const target = phaseTargetClock();
+        if (traceClock < target) {
+          traceClock = Math.min(target, traceClock + dt);
+        } else if (traceClock > target) {
+          // scrubbing backward: snap down so the trace shortens with the beat
+          traceClock = target;
+        }
+        const traceFrac = clamp01(traceClock / SWEEP_SECONDS);
+
+        // Reveal eases unlock cumulatively by phase.
         const targets = {
-          frame: phase >= 0 ? 1 : 0,
+          frame: 1, // scope is always present
           equation: phase >= 1 ? 1 : 0,
-          trace: phase >= 2 ? 1 : 0,
+          trace: phase >= 2 ? 1 : phase >= 1 ? 0.6 : 0,
           readout: phase >= 3 ? 1 : 0,
         };
-        const k = 1 - Math.pow(0.001, dt); // frame-rate-independent approach
+        const k = 1 - Math.pow(0.0015, dt); // frame-rate-independent approach
         reveals.frame += (targets.frame - reveals.frame) * k;
         reveals.equation += (targets.equation - reveals.equation) * k;
         reveals.trace += (targets.trace - reveals.trace) * k;
@@ -533,7 +600,7 @@ const sim: Sim = {
 
         kit.grid(p, { reveal: 1 });
 
-        // title
+        // title + mode tag
         kit.label(p, {
           x: 28,
           y: 30,
@@ -559,12 +626,17 @@ const sim: Sim = {
           align: "left",
           color: AMBER,
         });
+        kit.phaseDots(p, {
+          x: W - 28 - phaseCount * 20,
+          y: 26,
+          total: phaseCount,
+          current: phase,
+        });
 
-        const xLabel =
-          mode === MODE_AP ? "TIME (ms)" : "TIME";
+        const xLabel = mode === MODE_AP ? "TIME (ms)" : "TIME";
         drawScopeFrame(p, scope, xLabel);
 
-        // equation overlay placement + opacity (phase ≥ 1)
+        // equation overlay: placed below the scope, opacity gated to P1+
         renderEquation(mode);
         eqEl.style.left = `${Math.round(scope.x)}px`;
         eqEl.style.top = `${Math.round(scope.y + scope.h + 34)}px`;
@@ -572,13 +644,12 @@ const sim: Sim = {
         eqEl.style.transform = `scale(${eqScale.toFixed(3)})`;
         eqEl.style.opacity = `${ease.outCubic(reveals.equation).toFixed(3)}`;
 
-        // ── mode-specific content ────────────────────────────────────
         if (mode === MODE_RC) {
-          drawRc(p, W, H, scope);
+          drawRc(p, W, H, scope, traceFrac);
         } else if (mode === MODE_FOURIER) {
-          drawFourier(p, W, H, scope);
+          drawFourier(p, W, H, scope, traceFrac);
         } else {
-          drawAp(p, W, H, scope);
+          drawAp(p, W, H, scope, traceFrac);
         }
       };
 
@@ -588,15 +659,18 @@ const sim: Sim = {
         W: number,
         H: number,
         scope: { x: number; y: number; w: number; h: number },
+        traceFrac: number,
       ) {
         const Rk = params.R; // kΩ
         const Cuf = params.C; // µF
-        const tauS = (Rk * 1e3) * (Cuf * 1e-6); // seconds
-        const windowS = Math.max(tauS * 8, 0.4); // show ~4τ each phase
-        const pts = rcPoints(tauS, windowS, 240);
+        const tauS = Rk * 1e3 * (Cuf * 1e-6); // seconds
+        const windowS = Math.max(tauS * 8, 0.4); // show ~4τ each half
+        const pts = rcPoints(tauS, windowS, traceFrac, 240);
 
-        // schematic upper-left (revealed with the equation phase)
-        const schAlpha = ease.outCubic(reveals.equation);
+        // schematic upper-left — the idle ELEMENT shows from P0 (frame), the
+        // current FLOW turns on at P1 (equation beat = stimulus applied).
+        const schAlpha = ease.outCubic(reveals.frame);
+        const flowing = phase >= 1;
         const sw = Math.min(W * 0.24, 220);
         const sh = Math.min(H * 0.18, 130);
         drawRcSchematic(
@@ -606,10 +680,10 @@ const sim: Sim = {
           sw,
           sh,
           schAlpha,
-          reveals.trace > 0.2,
+          flowing,
         );
 
-        // V∞ dashed asymptote line
+        // V₀ dashed asymptote — part of the bare scope reference, P0+
         const r = ease.outCubic(reveals.frame);
         if (r > 0.2) {
           p.push();
@@ -631,17 +705,16 @@ const sim: Sim = {
           });
         }
 
-        // trace
-        drawTrace(p, scope, pts, AMBER, ease.outCubic(reveals.trace), 1.5, 1);
+        // the trace itself — its LENGTH is the real build state (pts truncated)
+        drawTrace(p, scope, pts, AMBER, ease.outCubic(reveals.trace), 1.5);
 
-        // live head dot riding the trace by clock
-        if (reveals.trace > 0.5) {
-          const headT = (clock % windowS) / windowS;
-          const idx = Math.min(pts.length - 1, Math.floor(headT * (pts.length - 1)));
-          glowDot(p, sx(scope, pts[idx].x), sy(scope, pts[idx].y), AMBER);
+        // live head dot rides the leading edge of the built trace (P1+, faint)
+        if (reveals.equation > 0.4 && pts.length > 1) {
+          const head = pts[pts.length - 1];
+          glowDot(p, sx(scope, head.x), sy(scope, head.y), AMBER, ease.outCubic(reveals.trace) * 0.9 + 0.1);
         }
 
-        // readouts + legend (phase 3)
+        // readouts + legend — STRICTLY P3 (τ not shown before)
         const ra = ease.outCubic(reveals.readout);
         if (ra > 0.01) {
           const tauMs = tauS * 1000;
@@ -666,12 +739,13 @@ const sim: Sim = {
         _W: number,
         _H: number,
         scope: { x: number; y: number; w: number; h: number },
+        traceFrac: number,
       ) {
         const N = Math.round(params.numHarmonics);
         const cycles = 2;
-        const { sum, harmonics, odds } = fourierData(N, cycles, 360);
+        const { sum, harmonics, odds } = fourierData(N, cycles, traceFrac, 360);
 
-        // zero line
+        // zero line — bare scope reference, P0+
         const r = ease.outCubic(reveals.frame);
         if (r > 0.2) {
           p.push();
@@ -682,25 +756,24 @@ const sim: Sim = {
           p.pop();
         }
 
-        // individual harmonics (faint blue), revealed with the equation phase
+        // individual harmonics (faint blue), revealed with the equation beat
         const ha = ease.outCubic(reveals.equation) * 0.5;
         if (ha > 0.01) {
           const show = Math.min(harmonics.length, 6); // don't clutter past 6
           for (let i = 0; i < show; i++) {
-            drawTrace(p, scope, harmonics[i], BLUE, ha * (1 - i / (show + 1)), 1, 1);
+            drawTrace(p, scope, harmonics[i], BLUE, ha * (1 - i / (show + 1)), 1);
           }
         }
 
-        // partial sum (amber), draws on with the trace phase
-        drawTrace(p, scope, sum, AMBER, ease.outCubic(reveals.trace), 1.5, 1);
+        // partial sum (amber) — its length builds with the trace clock
+        drawTrace(p, scope, sum, AMBER, ease.outCubic(reveals.trace), 1.5);
 
-        // live head dot sweeping across
-        if (reveals.trace > 0.5) {
-          const headT = (clock * 0.4) % 1;
-          const idx = Math.min(sum.length - 1, Math.floor(headT * (sum.length - 1)));
-          glowDot(p, sx(scope, sum[idx].x), sy(scope, sum[idx].y), AMBER);
+        if (reveals.equation > 0.4 && sum.length > 1) {
+          const head = sum[sum.length - 1];
+          glowDot(p, sx(scope, head.x), sy(scope, head.y), AMBER, ease.outCubic(reveals.trace) * 0.9 + 0.1);
         }
 
+        // readouts — STRICTLY P3
         const ra = ease.outCubic(reveals.readout);
         if (ra > 0.01) {
           const f0 = 50; // nominal fundamental (Hz) for the readout
@@ -726,13 +799,14 @@ const sim: Sim = {
         _W: number,
         _H: number,
         scope: { x: number; y: number; w: number; h: number },
+        traceFrac: number,
       ) {
         const stim = params.stimulus;
         const windowS = 1.0; // ~10 ms scaled
-        const { pts, fires, peakMv, norm } = apData(stim, windowS, 300);
+        const { pts, fires, peakMv, norm } = apData(stim, windowS, traceFrac, 300);
 
         const r = ease.outCubic(reveals.frame);
-        // threshold + rest reference lines (revealed with equation phase)
+        // threshold + rest reference lines — revealed with the equation beat
         const la = ease.outCubic(reveals.equation);
         if (la > 0.01) {
           const drawRef = (mv: number, color: RGB, txt: string) => {
@@ -757,30 +831,31 @@ const sim: Sim = {
           drawRef(AP_REST, MUTED, "REST −70 mV");
         }
 
-        // trace
         const traceColor = fires ? AMBER : palette.fgMuted;
-        drawTrace(p, scope, pts, traceColor, ease.outCubic(reveals.trace), 1.5, 1);
+        drawTrace(p, scope, pts, traceColor, ease.outCubic(reveals.trace), 1.5);
 
-        if (reveals.trace > 0.5) {
-          const headT = (clock * 0.5) % 1;
-          const idx = Math.min(pts.length - 1, Math.floor(headT * (pts.length - 1)));
-          glowDot(p, sx(scope, pts[idx].x), sy(scope, pts[idx].y), traceColor);
+        if (reveals.equation > 0.4 && pts.length > 1) {
+          const head = pts[pts.length - 1];
+          glowDot(p, sx(scope, head.x), sy(scope, head.y), traceColor, ease.outCubic(reveals.trace) * 0.9 + 0.1);
         }
 
-        // stimulus marker arrow at injection time
-        if (r > 0.3) {
+        // stimulus marker arrow at injection time — the stimulus applied at P1
+        const sa = ease.outCubic(reveals.equation);
+        if (sa > 0.01) {
           const ix = sx(scope, 0.18);
           p.push();
-          p.stroke(TEAL[0], TEAL[1], TEAL[2], 0.7 * r * 255);
+          p.stroke(TEAL[0], TEAL[1], TEAL[2], 0.7 * sa * 255);
           p.strokeWeight(1.5);
           p.line(ix, scope.y + scope.h, ix, scope.y + scope.h + 14);
           p.noStroke();
-          p.fill(TEAL[0], TEAL[1], TEAL[2], 0.7 * r * 255);
+          p.fill(TEAL[0], TEAL[1], TEAL[2], 0.7 * sa * 255);
           p.triangle(ix - 4, scope.y + scope.h + 4, ix + 4, scope.y + scope.h + 4, ix, scope.y + scope.h - 2);
           p.pop();
-          kit.label(p, { x: ix, y: scope.y + scope.h + 24, text: "STIM", size: 9, upper: true, mono: true, color: TEAL, alpha: r });
+          kit.label(p, { x: ix, y: scope.y + scope.h + 24, text: "STIM", size: 9, upper: true, mono: true, color: TEAL, alpha: sa });
         }
+        void r;
 
+        // readouts — STRICTLY P3
         const ra = ease.outCubic(reveals.readout);
         if (ra > 0.01) {
           readout(p, scope.x, scope.y - 64, "Peak potential", `${peakMv.toFixed(0)} mV`, fires ? AMBER : MUTED, ra);
@@ -804,10 +879,16 @@ const sim: Sim = {
 
     return {
       setPhase(n: number) {
-        phase = Math.max(0, Math.floor(n));
+        const next = Math.max(0, Math.min(phaseCount - 1, Math.floor(n)));
+        // Scrubbing back to the bare scope resets the build so it replays.
+        if (next < phase) traceClock = Math.min(traceClock, PHASE_WINDOW_FRAC[Math.min(next, PHASE_WINDOW_FRAC.length - 1)] * SWEEP_SECONDS);
+        phase = next;
       },
       setParam(key: string, value: number) {
-        if (key in params && Number.isFinite(value)) params[key] = value;
+        if (!(key in params) || !Number.isFinite(value)) return;
+        params[key] = value;
+        // Mode switch needs a fresh equation; the trace keeps its build state.
+        if (key === "mode") renderedEqForMode = -1;
       },
       dispose() {
         inst.remove();

@@ -356,14 +356,19 @@ const sim: Sim = {
         p.translate(offX, offY);
         p.scale(sc);
 
-        // ── FIELD ARROWS (phase 0 reveal, then held faint underneath) ───────
-        const arrowReveal =
-          phase === 0 ? ease.outCubic(Math.min(1, elapsed / 1100)) : 1;
-        const arrowAlpha = phase === 0 ? 0.5 * arrowReveal : 0.12;
-        drawFieldArrows(p, kit, fieldAt, tSec, arrowAlpha);
+        // ── FIELD ARROWS — staged diagonal sweep at P0 so the field reads as
+        // BUILDING, then held faint underneath once particles take over. ─────
+        const arrowSweep =
+          phase === 0 ? ease.smoothstep(Math.min(1, elapsed / 1700)) : 1;
+        // Brighter while it's the focus (P0), dim once it's just scaffolding.
+        const arrowAlpha = phase === 0 ? 0.55 : 0.12;
+        drawFieldArrows(p, kit, fieldAt, tSec, arrowAlpha, arrowSweep);
 
-        // Feature markers per field type.
-        if (params.fieldType === 2) {
+        // Feature markers, gated by phase. P0 stays a pure arrow field. The
+        // obstacle BODY appears once particles flow (P1+) so trails visibly
+        // part around it; its accent emphasis (and the vortex core / poles)
+        // only light up on the feature beat (P3).
+        if (params.fieldType === 2 && phase >= 1) {
           drawObstacle(p, kit, phase);
         } else if (params.fieldType === 0 && phase >= 3) {
           drawVortexCore(p, kit, tSec);
@@ -438,22 +443,31 @@ const sim: Sim = {
 
         p.pop();
 
-        // ── READOUTS + LABELS (screen space, on top) ────────────────────────
+        // ── HUD (screen space, on top, in its OWN clean panel) ──────────────
+        // Gated by phase: P0 shows only a minimal field-name label so the
+        // building arrow grid stays uncluttered; the full readout panel (with
+        // an opaque backing so arrows never bleed through the text) reveals on
+        // the feature beat. Reveal is local-eased off the phase-3 clock.
+        const hudReveal =
+          phase >= 3 ? ease.outCubic(Math.min(1, elapsed / 600)) : 0;
         drawHud(p, kit, {
           fieldType: params.fieldType,
           maxSpeed: maxSpeedSeen,
-          particleCount: phase >= 1 ? Math.round(params.particleCount) : 0,
+          particleCount: Math.round(params.particleCount),
           turbulence: params.turbulence,
+          reveal: hudReveal,
         });
 
-        // Continuity / streamline equation appears on the feature beat.
+        // Continuity / streamline equation appears on the feature beat, fading
+        // in with the panel so the math, the feature and the readouts land
+        // together as one beat.
         positionEquation(equationOverlay, {
           x: W / 2,
           y: H - 60,
           latex: continuityTex,
           size: Math.max(15, Math.min(22, W * 0.014)),
           color: palette.fgMuted,
-          alpha: phase >= 3 ? 1 : 0,
+          alpha: hudReveal,
         });
 
         kit.phaseDots(p, {
@@ -542,33 +556,45 @@ function phaseLabelFor(phase: number, ft: FieldType): string {
 }
 
 // Sample the field on a coarse grid and draw faint arrows. Design space.
+// `sweep` (0..1) staggers the reveal diagonally across the grid so the field
+// visibly BUILDS at the opening instead of snapping in as a dead static grid.
 function drawFieldArrows(
   p: P5,
   kit: Kit,
   fieldAt: (x: number, y: number, t: number, out: Vel) => void,
   tSec: number,
   alpha: number,
+  sweep: number,
 ): void {
   if (alpha <= 0.01) return;
   const step = 80;
   const out: Vel = { vx: 0, vy: 0 };
   const accent = kit.palette.accent;
+  // Diagonal sweep: an arrow at normalized diagonal d (0 top-left → 1 bottom-
+  // right) only starts appearing once the sweep front passes it, then fades up
+  // over a short band. At sweep=1 the whole field is lit.
+  const band = 0.28;
+  const front = sweep * (1 + band);
   p.strokeCap(p.ROUND);
   for (let gx = step / 2; gx < VW; gx += step) {
     for (let gy = step / 2; gy < VH; gy += step) {
+      const d = (gx / VW + gy / VH) * 0.5; // 0..1 along the diagonal
+      const local = sweep >= 1 ? 1 : kit.clamp01((front - d) / band);
+      if (local <= 0.01) continue;
+      const aReveal = kit.ease.outCubic(local);
       fieldAt(gx, gy, tSec, out);
       const sp = Math.hypot(out.vx, out.vy);
       if (sp < 1e-3) continue;
       // Fixed visual length so the grid reads as a direction field, with a
-      // gentle speed-based length boost (capped).
-      const len = Math.min(34, 14 + sp * 0.03);
+      // gentle speed-based length boost (capped). The shaft also grows in.
+      const len = Math.min(34, 14 + sp * 0.03) * aReveal;
       const ux = (out.vx / sp) * len;
       const uy = (out.vy / sp) * len;
       const x2 = gx + ux;
       const y2 = gy + uy;
-      kit.stroke(p, accent, alpha, 1);
+      kit.stroke(p, accent, alpha * aReveal, 1);
       p.line(gx, gy, x2, y2);
-      // Arrowhead.
+      // Arrowhead (fades in with the shaft).
       const ah = 4.5;
       const ang = Math.atan2(uy, ux);
       p.line(x2, y2, x2 + Math.cos(ang + 2.6) * ah, y2 + Math.sin(ang + 2.6) * ah);
@@ -616,37 +642,82 @@ interface HudOpts {
   maxSpeed: number;
   particleCount: number;
   turbulence: number;
+  /** 0..1 reveal of the full readout panel. 0 ⇒ only the minimal name chip. */
+  reveal: number;
 }
 
-// Compact technical readouts, top-left, mono. Screen space.
+function fieldName(ft: FieldType): string {
+  return ft === 0 ? "VORTEX" : ft === 1 ? "SOURCE–SINK" : "WIND + OBSTACLE";
+}
+
+// The HUD lives in its OWN reserved zone, top-left, so it never sits on top of
+// the field arrows. Two states:
+//   • before the feature beat — a single minimal "FLOW FIELD · <type>" chip on
+//     an opaque backing so the building arrow grid stays clean underneath it.
+//   • on the feature beat (reveal>0) — that chip grows into a readout PANEL: an
+//     opaque surface card with a hairline border holding MAX|v| / PARTICLES /
+//     TURBULENCE. The opaque fill guarantees arrows never bleed through text.
 function drawHud(p: P5, kit: Kit, o: HudOpts): void {
   const { palette } = kit;
-  const x = 28;
-  let y = 34;
-  const fieldName =
-    o.fieldType === 0
-      ? "VORTEX"
-      : o.fieldType === 1
-        ? "SOURCE–SINK"
-        : "WIND + OBSTACLE";
+  const PAD = 16; // inner padding so nothing kisses the panel edge
+  const x = 24; // panel left
+  const y = 24; // panel top
+  const reveal = kit.clamp01(o.reveal);
 
+  // Title row width drives the collapsed-chip width.
+  const titleTxt = "FLOW FIELD · " + fieldName(o.fieldType);
+  p.push();
+  p.textFont("Menlo, Monaco, Consolas, monospace");
+  p.textSize(12);
+  const titleW = p.textWidth(titleTxt) * 1.08 + 6; // +tracking slack
+  p.pop();
+
+  const rows: { label: string; value: string }[] = [
+    { label: "MAX |v|", value: `${(o.maxSpeed / 100).toFixed(2)} rel` },
+    { label: "PARTICLES", value: String(o.particleCount) },
+    { label: "TURBULENCE", value: `${(o.turbulence * 100).toFixed(0)} %` },
+  ];
+
+  // Panel geometry. Width interpolates chip → full panel as it reveals.
+  const fullW = 232;
+  const w = Math.max(titleW + PAD * 2, kit.lerp(titleW + PAD * 2, fullW, reveal));
+  const titleH = 12 + PAD; // chip-only height
+  const rowsH = 14 + rows.length * 30; // title gap + rows
+  const h = kit.lerp(titleH, titleH + rowsH, reveal);
+
+  // Backing card — OPAQUE so field arrows behind it can't read through the
+  // text. Tinted-black base nearly fully opaque, hairline border.
+  p.push();
+  p.noStroke();
+  p.fill(palette.bg[0], palette.bg[1], palette.bg[2], 232);
+  p.rect(x, y, w, h, 10);
+  p.fill(palette.surface[0], palette.surface[1], palette.surface[2], 0.6 * 255);
+  p.rect(x, y, w, h, 10);
+  p.stroke(255, 255, 255, 0.1 * 255);
+  p.strokeWeight(1);
+  p.noFill();
+  p.rect(x, y, w, h, 10);
+  p.pop();
+
+  const tx = x + PAD;
+  let ty = y + PAD + 6;
   kit.label(p, {
-    x,
-    y,
-    text: "FLOW FIELD · " + fieldName,
+    x: tx,
+    y: ty,
+    text: titleTxt,
     size: 12,
     upper: true,
     mono: true,
     color: palette.fgMuted,
     align: "left",
   });
-  y += 26;
 
-  readoutRow(p, kit, x, y, "MAX |v|", (o.maxSpeed / 100).toFixed(2), "rel");
-  y += 34;
-  readoutRow(p, kit, x, y, "PARTICLES", String(o.particleCount), "");
-  y += 34;
-  readoutRow(p, kit, x, y, "TURBULENCE", (o.turbulence * 100).toFixed(0), "%");
+  if (reveal <= 0.01) return;
+
+  ty += 28;
+  rows.forEach((r, i) => {
+    readoutRow(p, kit, tx, ty + i * 30, r.label, r.value, reveal);
+  });
 }
 
 function readoutRow(
@@ -656,7 +727,7 @@ function readoutRow(
   y: number,
   label: string,
   value: string,
-  unit: string,
+  alpha: number,
 ): void {
   const { palette } = kit;
   kit.label(p, {
@@ -668,16 +739,18 @@ function readoutRow(
     mono: true,
     color: palette.fgSubtle,
     align: "left",
+    alpha,
   });
   kit.label(p, {
-    x: x + 92,
+    x: x + 110,
     y,
-    text: unit ? `${value} ${unit}` : value,
+    text: value,
     size: 14,
     mono: true,
     color: palette.accent,
     align: "left",
     weight: "bold",
+    alpha,
   });
 }
 

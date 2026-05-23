@@ -16,18 +16,29 @@
  * collision energy, concentration adds molecules. All three visibly change how
  * fast product builds up.
  *
- * The right panel carries the technical story: the balanced equation + the
- * Arrhenius rate law k = A·e^(−Eₐ/RT) (KaTeX overlay), an energy-vs-reaction-
- * coordinate diagram with the Eₐ hump and ΔH drop labeled, live concentration
- * curves, and readouts for T, rate, conversion, catalyst.
+ * The scene unfolds like a video — nothing is shown all at once. Each beat
+ * gates the physics clock AND the annotations, exactly mirroring traffic-jam.ts
+ * and epidemic.ts:
+ *
+ *   P0  bare reactants drifting + vibrating in the box. The reaction clock is
+ *       frozen for products — molecules just bounce. No collision highlight,
+ *       no energy diagram, no equation, no plot, no readouts.
+ *   P1  the activation event: the first H₂+O₂ collision that clears the barrier
+ *       is found and held under a pulsing amber ring ("activated complex"). Still
+ *       NO products, NO energy diagram, NO equation, NO plot.
+ *   P2  bonds break and reform — reactions now fire, H₂O builds, and the live
+ *       concentration curves fill in. Energy diagram + equation still hidden.
+ *   P3  the energy-vs-reaction-coordinate diagram (Eₐ hump + ΔH drop labeled),
+ *       the balanced equation + the Arrhenius rate law k = A·e^(−Eₐ/RT) (KaTeX
+ *       overlay), and the readouts (T, rate k, % converted, catalyst).
  *
  * Contract: default-exports a `Sim` (id "molecules"). `create` mounts a p5
  * instance, runs its own deterministic physics, and returns a SceneController.
- * setPhase gates which overlays/annotations show (reactants → collision →
- * rearrangement → products+diagram); setParam tunes temperature / concentration
- * / catalyst live; dispose tears down p5 + the KaTeX overlay node. Deterministic:
- * a seeded PRNG drives all placement/velocity and physics advances on a fixed
- * dt, so the same inputs reproduce the same run.
+ * setPhase gates which physics/overlays/annotations are live (reactants →
+ * activation → rearrangement → products+diagram); setParam tunes temperature /
+ * concentration / catalyst live; dispose tears down p5 + the KaTeX overlay node.
+ * Deterministic: a seeded PRNG drives all placement/velocity and physics
+ * advances on a fixed dt, so the same inputs reproduce the same run.
  *
  * p5 2.x safe: uses only createCanvas/background/push/pop/translate/scale/rotate/
  * circle/line/rect/triangle/beginShape+vertex/endShape/text/fill/stroke. No
@@ -103,6 +114,15 @@ interface Spark {
   reacted: boolean; // true = successful (accent flash), false = bounce (warn)
 }
 
+// The single collision frozen under the spotlight at P1 (the activation event):
+// the midpoint of the first H₂+O₂ pair that clears the barrier. Held until the
+// reaction is allowed to actually fire (P2), where it converts into products.
+interface Activation {
+  x: number;
+  y: number;
+  found: boolean;
+}
+
 const sim: Sim = {
   id: "molecules",
   title: "Reaction Kinetics",
@@ -146,9 +166,11 @@ const sim: Sim = {
     const BOND_OH = 34; // O–H separation in water
 
     // ── deterministic world ────────────────────────────────────────────────
-    const rng = mulberry32(0x5eed1234);
+    let rng = mulberry32(0x5eed1234);
     let mols: Mol[] = [];
     const sparks: Spark[] = [];
+    const activation: Activation = { x: 0, y: 0, found: false };
+    let activationPulse = 0; // sim-time the activation was first highlighted
 
     let history: { t: number; h2: number; o2: number; h2o: number }[] = [];
     let initialReactant = 1; // H₂ count at t=0 (conversion + plot scaling)
@@ -156,6 +178,7 @@ const sim: Sim = {
     let lastSample = 0;
     let reactionCount = 0; // total H₂O molecules formed
     let rateEMA = 0; // rolling H₂O-per-second estimate
+    let diagramOpenedAt = -1; // sim-time the P3 energy diagram first drew on
 
     function speedForT(): number {
       // mean molecular speed ∝ sqrt(T) (kinetic theory feel)
@@ -163,9 +186,15 @@ const sim: Sim = {
     }
 
     function spawnReactants(): void {
+      // Re-seed the PRNG so the run is reproducible across every (re)spawn —
+      // including scrubbing the phase back to the start.
+      rng = mulberry32(0x5eed1234);
       mols = [];
       history = [];
       sparks.length = 0;
+      activation.found = false;
+      activationPulse = 0;
+      diagramOpenedAt = -1;
       simTime = 0;
       lastSample = 0;
       reactionCount = 0;
@@ -287,7 +316,11 @@ const sim: Sim = {
     }
 
     function step(): void {
-      const reactive = phase >= 1; // collisions can react from phase 1 on
+      // P0: nothing reacts (bare reactants drift). P1: collisions are TESTED so
+      // we can spotlight the first activated complex, but none are consumed —
+      // products only form once bonds are allowed to break at P2.
+      const reactive = phase >= 2;
+      const seeking = phase >= 1; // P1 hunts for the activation event
       const ea = activationEnergy();
 
       // integrate motion + wall bounce
@@ -332,12 +365,22 @@ const sim: Sim = {
 
           const pair = pairKind(a.kind, b.kind);
           let reacted = false;
-          if (reactive && pair && rel < 0) {
+          if (seeking && pair && rel < 0) {
             const ke = 0.5 * rel * rel * 0.18; // collision energy ∝ rel speed²
             const barrier = pair === "H2_O2" ? ea : O_RADICAL_BARRIER;
-            if (ke >= barrier) {
+            const overBarrier = ke >= barrier;
+            if (reactive && overBarrier) {
+              // P2+: bonds break — the pair reacts into products.
               reacted = reactProduct(a, b, pair);
-            } else {
+            } else if (!reactive && overBarrier && !activation.found && pair === "H2_O2") {
+              // P1: spotlight the FIRST H₂+O₂ collision that clears the barrier
+              // as the activation event. Freeze its location; do NOT consume the
+              // molecules — they bounce so the moment reads as a held instant.
+              activation.x = (a.x + b.x) / 2;
+              activation.y = (a.y + b.y) / 2;
+              activation.found = true;
+              activationPulse = simTime;
+            } else if (reactive && !overBarrier) {
               // approached fast enough to test but bounced off the barrier
               sparks.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, t: 1, reacted: false });
             }
@@ -372,6 +415,10 @@ const sim: Sim = {
       for (let k = sparks.length - 1; k >= 0; k--) if (sparks[k].t <= 0) sparks.splice(k, 1);
 
       simTime += DT;
+
+      // Concentrations only start recording once products can form (P2+), so the
+      // plot fills in WITH the rearrangement beat instead of pre-existing at P0.
+      if (phase < 2) return;
 
       // sample concentrations ~4×/sec
       if (simTime - lastSample >= 0.25) {
@@ -487,10 +534,10 @@ const sim: Sim = {
       "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;";
     const eqEl = document.createElement("div");
     eqEl.style.cssText =
-      "position:absolute;color:#f4f4f5;font-size:20px;text-align:left;transform-origin:left top;";
+      "position:absolute;color:#f4f4f5;font-size:20px;text-align:left;transform-origin:left top;opacity:0;transition:opacity .45s cubic-bezier(0.16,1,0.3,1);";
     const rateEl = document.createElement("div");
     rateEl.style.cssText =
-      "position:absolute;color:#a1a1aa;font-size:15px;text-align:left;transform-origin:left top;transition:opacity .3s;";
+      "position:absolute;color:#a1a1aa;font-size:15px;text-align:left;transform-origin:left top;opacity:0;transition:opacity .45s cubic-bezier(0.16,1,0.3,1);";
     overlay.appendChild(eqEl);
     overlay.appendChild(rateEl);
     if (getComputedStyle(container).position === "static") {
@@ -587,80 +634,90 @@ const sim: Sim = {
       kit.label(p, { x: x + 8, y, text: txt, size: 11, mono: true, color: palette.fgMuted, align: "left" });
     }
 
+    // The right panel is gated by beat, so the technical story arrives in order:
+    //   P0/P1 — empty (focus stays on the molecules and the activation event).
+    //   P2    — only the live concentration plot (concentrations begin shifting).
+    //   P3    — energy diagram (Eₐ hump + ΔH) + readouts join the plot.
     function drawPanel(p: P5): void {
+      if (phase < 2) return;
       const px = 1010;
       const panelW = 510;
 
       kit.label(p, {
         x: px,
         y: 64,
-        text: "Reaction energetics",
+        text: phase >= 3 ? "Reaction energetics" : "Concentrations",
         size: 16,
         weight: "bold",
         color: palette.fg,
         align: "left",
       });
 
-      // ENERGY DIAGRAM ─────────────────────────────────────────────────────
-      const exX = px;
-      const exY = 200;
-      const exW = panelW;
-      const exH = 170;
-      const ea = activationEnergy();
-      const curve = energyCurve();
-      const yMin = DH - 0.18;
-      const yMax = EA_BASE + 0.18;
-      drawAxes(p, exX, exY, exW, exH, "reaction coordinate", "energy");
-      const sy = (yv: number) => exY + exH - ((yv - yMin) / (yMax - yMin)) * exH;
-      const sx = (xv: number) => exX + xv * exW;
-      dash(p, exX, sy(0), exX + exW, sy(0), palette.fgSubtle, 0.4);
-      dash(p, exX, sy(DH), exX + exW, sy(DH), palette.fgSubtle, 0.4);
+      // ENERGY DIAGRAM (P3 only) ────────────────────────────────────────────
+      if (phase >= 3) {
+        const exX = px;
+        const exY = 200;
+        const exW = panelW;
+        const exH = 170;
+        const ea = activationEnergy();
+        const curve = energyCurve();
+        const yMin = DH - 0.18;
+        const yMax = EA_BASE + 0.18;
+        drawAxes(p, exX, exY, exW, exH, "reaction coordinate", "energy");
+        const sy = (yv: number) => exY + exH - ((yv - yMin) / (yMax - yMin)) * exH;
+        const sx = (xv: number) => exX + xv * exW;
+        dash(p, exX, sy(0), exX + exW, sy(0), palette.fgSubtle, 0.4);
+        dash(p, exX, sy(DH), exX + exW, sy(DH), palette.fgSubtle, 0.4);
 
-      const reveal = phase >= 1 ? 1 : ease.outCubic(Math.min(1, simTime / 0.8));
-      p.push();
-      p.noFill();
-      p.stroke(C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 255);
-      p.strokeWeight(1.5);
-      p.strokeJoin(p.ROUND);
-      p.beginShape();
-      const upto = Math.floor(reveal * (curve.length - 1));
-      for (let i = 0; i <= upto; i++) p.vertex(sx(curve[i].x), sy(curve[i].y));
-      p.endShape();
-      p.pop();
+        // Curve draws on when the beat first opens, then holds.
+        const reveal = ease.outCubic(kit.clamp01((simTime - diagramOpenedAt) / 0.8));
+        p.push();
+        p.noFill();
+        p.stroke(C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 255);
+        p.strokeWeight(1.5);
+        p.strokeJoin(p.ROUND);
+        p.beginShape();
+        const upto = Math.floor(reveal * (curve.length - 1));
+        for (let i = 0; i <= upto; i++) p.vertex(sx(curve[i].x), sy(curve[i].y));
+        p.endShape();
+        p.pop();
 
-      const peak = curve[Math.round(REACTION_COORD * (curve.length - 1))];
-      if (phase >= 2 || reveal >= 1) {
-        const pkx = sx(peak.x);
-        const pky = sy(peak.y);
-        p.noStroke();
-        p.fill(C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 255);
-        p.circle(pkx, pky, 7);
-        dash(p, pkx, sy(0), pkx, pky, C_ACCENT, 0.5);
-        kit.label(p, {
-          x: pkx + 10,
-          y: (sy(0) + pky) / 2,
-          text: "Ea " + ea.toFixed(2),
-          size: 12,
-          mono: true,
-          color: C_ACCENT,
-          align: "left",
-        });
-        kit.label(p, {
-          x: exX + exW - 4,
-          y: sy(DH) - 12,
-          text: "ΔH " + DH.toFixed(2),
-          size: 12,
-          mono: true,
-          color: palette.teal,
-          align: "right",
-        });
-        kit.label(p, { x: exX + 2, y: sy(0) - 12, text: "reactants", size: 11, mono: true, color: palette.fgMuted, align: "left" });
-        kit.label(p, { x: exX + exW - 2, y: sy(DH) + 16, text: "products", size: 11, mono: true, color: palette.fgMuted, align: "right" });
+        if (reveal >= 1) {
+          const peak = curve[Math.round(REACTION_COORD * (curve.length - 1))];
+          const pkx = sx(peak.x);
+          const pky = sy(peak.y);
+          p.noStroke();
+          p.fill(C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 255);
+          p.circle(pkx, pky, 7);
+          dash(p, pkx, sy(0), pkx, pky, C_ACCENT, 0.5);
+          kit.label(p, {
+            x: pkx + 10,
+            y: (sy(0) + pky) / 2,
+            text: "Ea " + ea.toFixed(2),
+            size: 12,
+            mono: true,
+            color: C_ACCENT,
+            align: "left",
+          });
+          kit.label(p, {
+            x: exX + exW - 4,
+            y: sy(DH) - 12,
+            text: "ΔH " + DH.toFixed(2),
+            size: 12,
+            mono: true,
+            color: palette.teal,
+            align: "right",
+          });
+          kit.label(p, { x: exX + 2, y: sy(0) - 12, text: "reactants", size: 11, mono: true, color: palette.fgMuted, align: "left" });
+          kit.label(p, { x: exX + exW - 2, y: sy(DH) + 16, text: "products", size: 11, mono: true, color: palette.fgMuted, align: "right" });
+        }
       }
 
-      // CONCENTRATION PLOT ──────────────────────────────────────────────────
+      // CONCENTRATION PLOT (P2+) ─────────────────────────────────────────────
+      // Sits up high at P2 (it's the only panel content), then drops to make
+      // room for the energy diagram at P3.
       const cX = px;
-      const cY = 470;
+      const cY = phase >= 3 ? 470 : 220;
       const cW = panelW;
       const cH = 150;
       drawAxes(p, cX, cY, cW, cH, "time", "concentration");
@@ -688,23 +745,25 @@ const sim: Sim = {
       legendRow(p, cX + cW - 100, cY + 10, C_O, "O₂");
       legendRow(p, cX + cW - 52, cY + 10, C_PRODUCT, "H₂O");
 
-      // READOUTS ──────────────────────────────────────────────────────────
-      const c = counts();
-      const conv = initialReactant > 0 ? (1 - c.H2 / initialReactant) * 100 : 0;
-      readout(p, px, 700, "Temperature", params.temperature.toFixed(0), "K", palette.fg);
-      readout(p, px + 175, 700, "Rate k", arrheniusK().toFixed(2), " s⁻¹", C_ACCENT);
-      readout(p, px + 350, 700, "Converted", Math.max(0, conv).toFixed(0), "%", palette.teal);
-      readout(p, px, 790, "Reactions", String(reactionCount), "", C_PRODUCT);
-      readout(
-        p,
-        px + 175,
-        790,
-        "Catalyst",
-        (params.catalyst * 100).toFixed(0),
-        "%",
-        params.catalyst > 0 ? C_ACCENT : palette.fgSubtle,
-      );
-      readout(p, px + 350, 790, "Live rate", Math.max(0, rateEMA).toFixed(1), "/s", palette.fgMuted);
+      // READOUTS (P3 only — incl. the % converted) ──────────────────────────
+      if (phase >= 3) {
+        const c = counts();
+        const conv = initialReactant > 0 ? (1 - c.H2 / initialReactant) * 100 : 0;
+        readout(p, px, 700, "Temperature", params.temperature.toFixed(0), "K", palette.fg);
+        readout(p, px + 175, 700, "Rate k", arrheniusK().toFixed(2), " s⁻¹", C_ACCENT);
+        readout(p, px + 350, 700, "Converted", Math.max(0, conv).toFixed(0), "%", palette.teal);
+        readout(p, px, 790, "Reactions", String(reactionCount), "", C_PRODUCT);
+        readout(
+          p,
+          px + 175,
+          790,
+          "Catalyst",
+          (params.catalyst * 100).toFixed(0),
+          "%",
+          params.catalyst > 0 ? C_ACCENT : palette.fgSubtle,
+        );
+        readout(p, px + 350, 790, "Live rate", Math.max(0, rateEMA).toFixed(1), "/s", palette.fgMuted);
+      }
     }
 
     function drawSparks(p: P5): void {
@@ -731,6 +790,45 @@ const sim: Sim = {
           );
         }
       }
+    }
+
+    // The P1 spotlight: a held, pulsing amber ring on the first H₂+O₂ collision
+    // that clears the barrier — the activation event, frozen as a focal instant.
+    function drawActivation(p: P5): void {
+      if (phase !== 1 || !activation.found) return;
+      const pulse = 0.5 + 0.5 * Math.sin((simTime - activationPulse) * 4);
+      const baseR = 64;
+      p.push();
+      p.noFill();
+      // soft halo
+      for (let i = 3; i >= 1; i--) {
+        const f = i / 3;
+        p.stroke(C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], (0.1 + 0.12 * pulse) * (1 - f) * 255);
+        p.strokeWeight(1.5);
+        p.circle(activation.x, activation.y, baseR * (1.1 + f * 0.9));
+      }
+      // crisp ring
+      p.stroke(C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], (0.7 + 0.3 * pulse) * 255);
+      p.strokeWeight(1.5);
+      p.circle(activation.x, activation.y, baseR);
+      p.pop();
+      kit.label(p, {
+        x: activation.x,
+        y: activation.y - baseR / 2 - 14,
+        text: "activated complex",
+        size: 12,
+        upper: true,
+        mono: true,
+        color: C_ACCENT,
+      });
+      kit.label(p, {
+        x: activation.x,
+        y: activation.y + baseR / 2 + 18,
+        text: "KE ≥ Ea",
+        size: 11,
+        mono: true,
+        color: palette.fgMuted,
+      });
     }
 
     // ── p5 sketch ────────────────────────────────────────────────────────
@@ -795,6 +893,7 @@ const sim: Sim = {
         p.pop();
 
         drawSparks(p); // glow under molecules
+        drawActivation(p); // P1 spotlight, behind the molecules
         for (const m of mols) if (m.alive) drawMolecule(p, m);
 
         drawPanel(p);
@@ -802,7 +901,10 @@ const sim: Sim = {
         p.pop();
 
         placeOverlay(scale, ox, oy);
-        rateEl.style.opacity = phase >= 1 ? "1" : "0.35";
+        // The equation + Arrhenius law belong to the final energetics beat (P3).
+        const showEq = phase >= 3;
+        eqEl.style.opacity = showEq ? "1" : "0";
+        rateEl.style.opacity = showEq ? "1" : "0";
       };
     };
 
@@ -810,7 +912,17 @@ const sim: Sim = {
 
     return {
       setPhase: (n: number) => {
-        phase = Math.max(0, Math.min(totalPhases - 1, Math.floor(n)));
+        const next = Math.max(0, Math.min(totalPhases - 1, Math.floor(n)));
+        // Scrubbing back below the rearrangement beat should restore bare
+        // reactants — respawn so products that already formed don't linger.
+        if (next < 2 && reactionCount > 0) {
+          phase = next;
+          spawnReactants();
+          return;
+        }
+        // Mark when the energetics diagram first opens so its curve draws on.
+        if (next >= 3 && phase < 3) diagramOpenedAt = simTime;
+        phase = next;
       },
       setParam: (key: string, value: number) => {
         if (!(key in params)) return;
