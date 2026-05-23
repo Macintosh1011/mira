@@ -16,9 +16,13 @@
  */
 import type {
   EaseSet,
+  EquationHandle,
+  EquationOpts,
+  KatexLike,
   Kit,
   P5,
   Palette,
+  Point2,
   RGB,
   Scene3D,
   Scene3DOpts,
@@ -1237,6 +1241,767 @@ function plotLine(
   }
 }
 
+// ── technical vocabulary (charts / physics / readouts) ──────────────────
+// Everything below maps a DATA domain (the units the sim thinks in) onto the
+// plot box in canvas px. Keep the same xMin/xMax/yMin/yMax across axesPro +
+// plot + gridlines and the curve registers against the ticks.
+
+// Format a tick/readout number tersely: drop the trailing ".0" when integral.
+function fmtNum(v: number, decimals: number): string {
+  const s = v.toFixed(decimals);
+  return decimals > 0 && /\.0+$/.test(s) ? s.slice(0, s.indexOf(".")) : s;
+}
+
+// Infer a sane decimal count from a domain span (so 0..1 ticks read "0.25",
+// 0..100 read "25", etc.). Deterministic — no locale, no rounding surprises.
+function inferDecimals(span: number, ticks: number): number {
+  const step = Math.abs(span) / Math.max(1, ticks);
+  if (step === 0) return 0;
+  if (step >= 10) return 0;
+  if (step >= 1) return Number.isInteger(step) ? 0 : 1;
+  if (step >= 0.1) return 1;
+  return 2;
+}
+
+// Labeled axes over a data domain: L-frame, outward tick marks with numbers +
+// units, optional interior gridlines, and axis titles. The richer sibling of
+// the legacy `axes` (kept intact for existing sims).
+function axesPro(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    xMin?: number;
+    xMax?: number;
+    yMin?: number;
+    yMax?: number;
+    ticks?: number;
+    xLabel?: string;
+    yLabel?: string;
+    xUnit?: string;
+    yUnit?: string;
+    decimals?: number;
+    gridlines?: boolean;
+    reveal?: number;
+    color?: RGB;
+  },
+): void {
+  const reveal = clamp01(opts.reveal ?? 1);
+  if (reveal <= 0.01) return;
+  const lineRev = EASE.outCubic(clamp01(reveal / 0.6)); // frame draws first
+  const tickRev = EASE.outCubic(clamp01((reveal - 0.4) / 0.6)); // ticks after
+  const xMin = opts.xMin ?? 0;
+  const xMax = opts.xMax ?? 1;
+  const yMin = opts.yMin ?? 0;
+  const yMax = opts.yMax ?? 1;
+  const ticks = Math.max(1, opts.ticks ?? 5);
+  const axisColor = opts.color ?? PALETTE.fgMuted;
+  const x0 = opts.x;
+  const y0 = opts.y;
+  const x1 = opts.x + opts.w;
+  const y1 = opts.y + opts.h;
+  const xUnit = opts.xUnit ?? "";
+  const yUnit = opts.yUnit ?? "";
+  const xDec = opts.decimals ?? inferDecimals(xMax - xMin, ticks);
+  const yDec = opts.decimals ?? inferDecimals(yMax - yMin, ticks);
+
+  p.push();
+  // Interior gridlines (faint), drawn under everything.
+  if (opts.gridlines ?? true) {
+    p.stroke(255, 255, 255, 0.05 * 255 * lineRev);
+    p.strokeWeight(1);
+    for (let i = 1; i <= ticks; i++) {
+      const gx = lerp(x0, x1, i / ticks);
+      const gy = lerp(y1, y0, i / ticks);
+      if (i < ticks) p.line(gx, y0, gx, y1);
+      if (i < ticks) p.line(x0, gy, x1, gy);
+    }
+  }
+
+  // L-frame: y-axis up, x-axis along the bottom. Draws on from the origin.
+  p.stroke(axisColor[0], axisColor[1], axisColor[2], 0.55 * 255 * lineRev);
+  p.strokeWeight(1.5);
+  p.strokeCap(p.ROUND);
+  const yEnd = lerp(y1, y0, lineRev);
+  const xEnd = lerp(x0, x1, lineRev);
+  p.line(x0, y1, x0, yEnd);
+  p.line(x0, y1, xEnd, y1);
+  p.pop();
+
+  if (tickRev <= 0.01) return;
+
+  // Tick marks + numbers.
+  p.push();
+  for (let i = 0; i <= ticks; i++) {
+    const f = i / ticks;
+    // X ticks along the bottom.
+    const tx = lerp(x0, x1, f);
+    p.stroke(axisColor[0], axisColor[1], axisColor[2], 0.5 * 255 * tickRev);
+    p.strokeWeight(1.5);
+    p.line(tx, y1, tx, y1 + 5);
+    if (i > 0 || xMin !== 0) {
+      label(p, {
+        x: tx,
+        y: y1 + 15,
+        text: fmtNum(lerp(xMin, xMax, f), xDec) + xUnit,
+        size: 10,
+        mono: true,
+        color: PALETTE.fgSubtle,
+        alpha: tickRev,
+      });
+    }
+    // Y ticks up the left.
+    const ty = lerp(y1, y0, f);
+    p.stroke(axisColor[0], axisColor[1], axisColor[2], 0.5 * 255 * tickRev);
+    p.line(x0 - 5, ty, x0, ty);
+    label(p, {
+      x: x0 - 9,
+      y: ty,
+      text: fmtNum(lerp(yMin, yMax, f), yDec) + yUnit,
+      size: 10,
+      mono: true,
+      color: PALETTE.fgSubtle,
+      align: "right",
+      alpha: tickRev,
+    });
+  }
+  p.pop();
+
+  // Axis titles.
+  if (opts.xLabel) {
+    label(p, {
+      x: x0 + opts.w / 2,
+      y: y1 + 32,
+      text: opts.xLabel,
+      size: 11,
+      upper: true,
+      mono: true,
+      color: PALETTE.fgMuted,
+      alpha: tickRev,
+    });
+  }
+  if (opts.yLabel) {
+    p.push();
+    p.translate(x0 - 44, y0 + opts.h / 2);
+    p.rotate(-Math.PI / 2);
+    label(p, {
+      x: 0,
+      y: 0,
+      text: opts.yLabel,
+      size: 11,
+      upper: true,
+      mono: true,
+      color: PALETTE.fgMuted,
+      alpha: tickRev,
+    });
+    p.pop();
+  }
+}
+
+// A line/curve plot in DATA space. Curve sampled into a vertex polyline (NO
+// quadraticVertex — removed in p5 2.x), drawing on left-to-right along the
+// path with a glowing leading head. Mirrors plotLine's feel but takes a real
+// domain so it lines up with axesPro ticks.
+function plot(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    points: Point2[];
+    xMin?: number;
+    xMax?: number;
+    yMin?: number;
+    yMax?: number;
+    drawProgress?: number;
+    color?: RGB;
+    head?: boolean;
+    weight?: number;
+    fillArea?: boolean;
+    clip?: boolean;
+  },
+): void {
+  const pts = opts.points;
+  if (pts.length < 2) return;
+  const color = opts.color ?? PALETTE.accent;
+  const prog = EASE.outCubic(clamp01(opts.drawProgress ?? 1));
+  if (prog <= 0.001) return;
+  const xMin = opts.xMin ?? 0;
+  const xMax = opts.xMax ?? 1;
+  const yMin = opts.yMin ?? 0;
+  const yMax = opts.yMax ?? 1;
+  const weight = opts.weight ?? 1.5;
+  const xSpan = xMax - xMin || 1;
+  const ySpan = yMax - yMin || 1;
+
+  const sx = (dx: number) => {
+    const f = (dx - xMin) / xSpan;
+    return opts.x + (opts.clip ? clamp01(f) : f) * opts.w;
+  };
+  const sy = (dy: number) => {
+    const f = (dy - yMin) / ySpan;
+    return opts.y + opts.h - (opts.clip ? clamp01(f) : f) * opts.h;
+  };
+
+  // Map every point to screen space once.
+  const screen = pts.map((q) => ({ x: sx(q.x), y: sy(q.y) }));
+
+  // Walk the path by how far `prog` has unspooled the *index*, like plotLine.
+  const last = (screen.length - 1) * prog;
+  const whole = Math.floor(last);
+  const frac = last - whole;
+  const drawn: { x: number; y: number }[] = [];
+  for (let i = 0; i <= whole; i++) drawn.push(screen[i]);
+  let hx = screen[whole].x;
+  let hy = screen[whole].y;
+  if (whole < screen.length - 1) {
+    hx = lerp(screen[whole].x, screen[whole + 1].x, frac);
+    hy = lerp(screen[whole].y, screen[whole + 1].y, frac);
+    drawn.push({ x: hx, y: hy });
+  }
+
+  p.push();
+  // Area fill from the curve down to the x-axis baseline (y for yMin).
+  if (opts.fillArea && drawn.length >= 2) {
+    const baseY = sy(Math.max(yMin, Math.min(yMax, 0 >= yMin && 0 <= yMax ? 0 : yMin)));
+    p.noStroke();
+    fill(p, color, 0.1 * prog);
+    p.beginShape();
+    p.vertex(drawn[0].x, baseY);
+    for (const s of drawn) p.vertex(s.x, s.y);
+    p.vertex(drawn[drawn.length - 1].x, baseY);
+    p.endShape(p.CLOSE);
+  }
+
+  // The curve itself.
+  p.noFill();
+  stroke(p, color, 1, weight);
+  p.strokeCap(p.ROUND);
+  p.strokeJoin(p.ROUND);
+  p.beginShape();
+  for (const s of drawn) p.vertex(s.x, s.y);
+  p.endShape();
+  p.pop();
+
+  if (opts.head ?? true) {
+    glow(p, hx, hy, 4, color, 0.6);
+    p.noStroke();
+    fill(p, color, 1);
+    p.circle(hx, hy, 7);
+  }
+}
+
+// An arrow/vector in SCREEN space (dx right, dy down). Shaft draws on with
+// reveal; arrowhead + optional magnitude label fade in at the end.
+function vector(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    dx: number;
+    dy: number;
+    color?: RGB;
+    label?: string;
+    showMagnitude?: boolean;
+    reveal?: number;
+    headSize?: number;
+    weight?: number;
+    decimals?: number;
+  },
+): void {
+  const reveal = clamp01(opts.reveal ?? 1);
+  if (reveal <= 0.01) return;
+  const color = opts.color ?? PALETTE.accent;
+  const shaftRev = EASE.outCubic(clamp01(reveal / 0.7));
+  const headRev = EASE.outCubic(clamp01((reveal - 0.6) / 0.4));
+  const mag = Math.hypot(opts.dx, opts.dy);
+  if (mag < 0.5) return;
+  const ux = opts.dx / mag;
+  const uy = opts.dy / mag;
+  const headSize = opts.headSize ?? 10;
+  const weight = opts.weight ?? 1.5;
+
+  // Tip = full vector; base of the head sits headSize back along the shaft.
+  const tipX = opts.x + opts.dx;
+  const tipY = opts.y + opts.dy;
+  // Shaft grows from tail toward the (head-adjusted) tip.
+  const shaftLen = (mag - (headRev > 0.01 ? headSize * 0.8 : 0)) * shaftRev;
+  const ex = opts.x + ux * shaftLen;
+  const ey = opts.y + uy * shaftLen;
+
+  p.push();
+  stroke(p, color, 0.9, weight);
+  p.strokeCap(p.ROUND);
+  p.line(opts.x, opts.y, ex, ey);
+
+  // Arrowhead.
+  if (headRev > 0.01) {
+    const a = Math.atan2(uy, ux);
+    const spread = 0.42;
+    p.noStroke();
+    fill(p, color, 0.9 * headRev);
+    p.triangle(
+      tipX,
+      tipY,
+      tipX - Math.cos(a - spread) * headSize * 1.6,
+      tipY - Math.sin(a - spread) * headSize * 1.6,
+      tipX - Math.cos(a + spread) * headSize * 1.6,
+      tipY - Math.sin(a + spread) * headSize * 1.6,
+    );
+  }
+  p.pop();
+
+  // Label at the head, nudged along the vector's perpendicular so it clears
+  // the shaft. Optionally suffix the magnitude.
+  if ((opts.label != null && opts.label !== "") || opts.showMagnitude) {
+    const decimals = opts.decimals ?? 1;
+    const parts: string[] = [];
+    if (opts.label) parts.push(opts.label);
+    if (opts.showMagnitude) parts.push("|" + fmtNum(mag, decimals) + "|");
+    const txt = parts.join(" ");
+    // Perpendicular offset (left of travel direction).
+    const nx = -uy;
+    const ny = ux;
+    label(p, {
+      x: tipX + ux * 10 + nx * 8,
+      y: tipY + uy * 10 + ny * 8,
+      text: txt,
+      size: 12,
+      mono: true,
+      weight: "bold",
+      color,
+      align: "center",
+      alpha: headRev,
+    });
+  }
+}
+
+// A technical numeric readout: uppercase mono caption stacked over a big value
+// with an optional unit. The instrument-panel beat.
+function readout(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    label: string;
+    value: number | string;
+    unit?: string;
+    color?: RGB;
+    decimals?: number;
+    size?: number;
+    align?: "left" | "center" | "right";
+    reveal?: number;
+    boxed?: boolean;
+  },
+): void {
+  const reveal = EASE.outCubic(clamp01(opts.reveal ?? 1));
+  if (reveal <= 0.01) return;
+  const color = opts.color ?? PALETTE.accent;
+  const size = opts.size ?? 24;
+  const align = opts.align ?? "center";
+  const rise = (1 - reveal) * 6;
+  const valTxt =
+    typeof opts.value === "number"
+      ? fmtNum(opts.value, opts.decimals ?? 2)
+      : opts.value;
+  const unit = opts.unit ?? "";
+
+  // Optional card behind the readout.
+  if (opts.boxed) {
+    p.push();
+    p.textFont(MONO);
+    p.textSize(size);
+    const vw = p.textWidth(valTxt + (unit ? " " + unit : ""));
+    p.textSize(10);
+    const lw = p.textWidth(opts.label.toUpperCase());
+    const w = Math.max(vw, lw) + 28;
+    const h = size + 30;
+    const bx =
+      align === "left" ? opts.x - 14 : align === "right" ? opts.x - w + 14 : opts.x - w / 2;
+    fill(p, PALETTE.surface, 0.7 * reveal);
+    p.stroke(255, 255, 255, 0.08 * 255 * reveal);
+    p.strokeWeight(1);
+    p.rect(bx, opts.y - h / 2 + rise, w, h, 8);
+    p.pop();
+  }
+
+  label(p, {
+    x: opts.x,
+    y: opts.y - size / 2 - 2 + rise,
+    text: opts.label,
+    size: 10,
+    upper: true,
+    mono: true,
+    color: PALETTE.fgMuted,
+    align,
+    alpha: reveal,
+  });
+  // Value (+ unit drawn smaller/muted, trailing).
+  label(p, {
+    x: opts.x,
+    y: opts.y + size / 4 + rise,
+    text: unit ? valTxt + " " + unit : valTxt,
+    size,
+    mono: true,
+    weight: "bold",
+    color,
+    align,
+    alpha: reveal,
+  });
+}
+
+// A color-keyed legend. Rows stagger in with reveal.
+function legend(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    items: { color: RGB; label: string }[];
+    rowH?: number;
+    swatch?: "line" | "dot";
+    reveal?: number;
+    boxed?: boolean;
+  },
+): void {
+  const reveal = clamp01(opts.reveal ?? 1);
+  if (reveal <= 0.01 || opts.items.length === 0) return;
+  const rowH = opts.rowH ?? 22;
+  const swatch = opts.swatch ?? "line";
+  const n = opts.items.length;
+
+  if (opts.boxed) {
+    p.push();
+    p.textFont(SANS);
+    p.textSize(12);
+    let maxW = 0;
+    for (const it of opts.items) maxW = Math.max(maxW, p.textWidth(it.label));
+    fill(p, PALETTE.surface, 0.7 * EASE.outCubic(reveal));
+    p.stroke(255, 255, 255, 0.08 * 255 * EASE.outCubic(reveal));
+    p.strokeWeight(1);
+    p.rect(opts.x - 12, opts.y - 14, maxW + 24 + 28, n * rowH + 8, 8);
+    p.pop();
+  }
+
+  opts.items.forEach((it, i) => {
+    // Stagger: each row reveals over its slice of the progress window.
+    const rowRev = EASE.outCubic(clamp01((reveal - (i / n) * 0.5) / 0.5));
+    if (rowRev <= 0.01) return;
+    const cy = opts.y + i * rowH;
+    p.push();
+    if (swatch === "dot") {
+      p.noStroke();
+      fill(p, it.color, rowRev);
+      p.circle(opts.x + 6, cy, 9);
+    } else {
+      stroke(p, it.color, rowRev, 2.5);
+      p.strokeCap(p.ROUND);
+      p.line(opts.x, cy, opts.x + 16, cy);
+    }
+    p.pop();
+    label(p, {
+      x: opts.x + 26,
+      y: cy,
+      text: it.label,
+      size: 12,
+      color: PALETTE.fg,
+      align: "left",
+      alpha: rowRev,
+    });
+  });
+}
+
+// Standalone interior gridlines (no axes) — for backdrops behind a plot.
+function gridlines(
+  p: P5,
+  opts: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    cols?: number;
+    rows?: number;
+    color?: RGB;
+    alpha?: number;
+    reveal?: number;
+  },
+): void {
+  const reveal = EASE.outCubic(clamp01(opts.reveal ?? 1));
+  if (reveal <= 0.01) return;
+  const cols = Math.max(1, opts.cols ?? 8);
+  const rows = Math.max(1, opts.rows ?? 5);
+  const color = opts.color ?? PALETTE.fg;
+  const alpha = (opts.alpha ?? 0.05) * reveal;
+  p.push();
+  p.stroke(color[0], color[1], color[2], alpha * 255);
+  p.strokeWeight(1);
+  for (let i = 0; i <= cols; i++) {
+    const gx = lerp(opts.x, opts.x + opts.w, i / cols);
+    p.line(gx, opts.y, gx, opts.y + opts.h);
+  }
+  for (let j = 0; j <= rows; j++) {
+    const gy = lerp(opts.y, opts.y + opts.h, j / rows);
+    p.line(opts.x, gy, opts.x + opts.w, gy);
+  }
+  p.pop();
+}
+
+// A span bracket: a line parallel to the span with perpendicular lips at each
+// end, plus an optional label at mid-span. Annotates "this range here".
+function bracket(
+  p: P5,
+  opts: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    depth?: number;
+    label?: string;
+    color?: RGB;
+    reveal?: number;
+    flip?: boolean;
+  },
+): void {
+  const reveal = EASE.outCubic(clamp01(opts.reveal ?? 1));
+  if (reveal <= 0.01) return;
+  const color = opts.color ?? PALETTE.fgMuted;
+  const depth = opts.depth ?? 8;
+  const dx = opts.x2 - opts.x1;
+  const dy = opts.y2 - opts.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  // Perpendicular, side chosen by `flip`.
+  const s = opts.flip ? -1 : 1;
+  const nx = -uy * s;
+  const ny = ux * s;
+
+  // The bracket sits offset by `depth` from the span line.
+  const ax = opts.x1 + nx * depth;
+  const ay = opts.y1 + ny * depth;
+  const bx = opts.x2 + nx * depth;
+  const by = opts.y2 + ny * depth;
+  const grown = reveal;
+
+  p.push();
+  stroke(p, color, 0.6, 1.5);
+  p.strokeCap(p.ROUND);
+  // Spine, draws on from the first end.
+  p.line(ax, ay, lerp(ax, bx, grown), lerp(ay, by, grown));
+  // Lips back toward the span at each end.
+  p.line(opts.x1, opts.y1, ax, ay);
+  if (grown > 0.95) p.line(opts.x2, opts.y2, bx, by);
+  p.pop();
+
+  if (opts.label && grown > 0.6) {
+    const mx = (ax + bx) / 2 + nx * 12;
+    const my = (ay + by) / 2 + ny * 12;
+    label(p, {
+      x: mx,
+      y: my,
+      text: opts.label,
+      size: 11,
+      mono: true,
+      color: PALETTE.fg,
+      align: "center",
+      alpha: EASE.outCubic(clamp01((grown - 0.6) / 0.4)),
+    });
+  }
+}
+
+// An engineering dimension line: extension lines off the measured span, a
+// dimension line offset between them with tick caps, and the value at mid-span.
+function dimension(
+  p: P5,
+  opts: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    value: number | string;
+    unit?: string;
+    offset?: number;
+    color?: RGB;
+    decimals?: number;
+    reveal?: number;
+  },
+): void {
+  const reveal = clamp01(opts.reveal ?? 1);
+  if (reveal <= 0.01) return;
+  const lineRev = EASE.outCubic(clamp01(reveal / 0.7));
+  const valRev = EASE.outCubic(clamp01((reveal - 0.6) / 0.4));
+  const color = opts.color ?? PALETTE.fgMuted;
+  const offset = opts.offset ?? 24;
+  const dx = opts.x2 - opts.x1;
+  const dy = opts.y2 - opts.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const nx = -uy;
+  const ny = ux;
+
+  // Dimension line endpoints (the span pushed out by `offset`).
+  const ax = opts.x1 + nx * offset;
+  const ay = opts.y1 + ny * offset;
+  const bx = opts.x2 + nx * offset;
+  const by = opts.y2 + ny * offset;
+
+  p.push();
+  // Extension lines (span -> dim line), with a small gap at the span.
+  stroke(p, color, 0.4, 1);
+  p.line(opts.x1 + nx * 3, opts.y1 + ny * 3, ax + nx * 4, ay + ny * 4);
+  p.line(opts.x2 + nx * 3, opts.y2 + ny * 3, bx + nx * 4, by + ny * 4);
+  // Dimension line, draws on from the center outward.
+  stroke(p, color, 0.6, 1.5);
+  p.strokeCap(p.ROUND);
+  const cx = (ax + bx) / 2;
+  const cy = (ay + by) / 2;
+  p.line(cx, cy, lerp(cx, ax, lineRev), lerp(cy, ay, lineRev));
+  p.line(cx, cy, lerp(cx, bx, lineRev), lerp(cy, by, lineRev));
+  // Tick caps (45°) at each end.
+  if (lineRev > 0.9) {
+    const cap = 5;
+    const tx = (ux - nx) * cap;
+    const ty = (uy - ny) * cap;
+    p.line(ax - tx, ay - ty, ax + tx, ay + ty);
+    p.line(bx - tx, by - ty, bx + tx, by + ty);
+  }
+  p.pop();
+
+  if (valRev > 0.01) {
+    const valTxt =
+      typeof opts.value === "number"
+        ? fmtNum(opts.value, opts.decimals ?? 1) + (opts.unit ?? "")
+        : opts.value + (opts.unit ?? "");
+    label(p, {
+      x: cx + nx * 11,
+      y: cy + ny * 11,
+      text: valTxt,
+      size: 11,
+      mono: true,
+      weight: "bold",
+      color: PALETTE.fg,
+      align: "center",
+      alpha: valRev,
+    });
+  }
+}
+
+// ── equations (LaTeX via KaTeX) ──────────────────────────────────────────
+// WHY AN HTML OVERLAY, NOT CANVAS:
+//   KaTeX renders math to HTML+CSS (stacked spans with absolute positioning &
+//   web-fonts), NOT to a bitmap. p5 has no API to rasterize a DOM subtree onto
+//   its canvas, and the "render KaTeX offscreen then drawImage" route needs the
+//   KaTeX_Main/Math/Size web-fonts fully loaded AND an SVG/foreignObject->image
+//   round-trip that taints the canvas and is fragile across browsers. The
+//   robust, deterministic approach is a positioned <div> layered OVER the
+//   canvas: KaTeX renders into it once, we move/scale/fade it per frame. It
+//   stays crisp at any DPR (real DOM text, not a stretched bitmap) and never
+//   touches the p5 draw buffer.
+//
+// CONTRACT: the kit is stateless, so it does NOT hold the canvas. The caller
+// passes the KaTeX namespace (host injects `libs.katex`) and the p5 container
+// element (the same `container` the render module receives). `equation` creates
+// ONE overlay <div> and returns a handle: call `.update(opts)` each frame to
+// reposition/restyle (cheap — no re-render of the math) and `.remove()` on
+// dispose. Re-rendering the LaTeX only happens when `latex` actually changes.
+//
+// For hosts that own their own overlay layer, `equationHtml` is a pure helper
+// that returns the KaTeX HTML string + the absolute placement (left/top/
+// transform) so they can inject it themselves without the kit touching the DOM.
+
+function rgbCss(c: RGB, alpha = 1): string {
+  return `rgba(${c[0]},${c[1]},${c[2]},${clamp01(alpha)})`;
+}
+
+function placement(opts: EquationOpts): { transform: string } {
+  const align = opts.align ?? "center";
+  const baseline = opts.baseline ?? "middle";
+  const tx = align === "left" ? "0" : align === "right" ? "-100%" : "-50%";
+  const ty = baseline === "top" ? "0" : baseline === "bottom" ? "-100%" : "-50%";
+  return { transform: `translate(${tx}, ${ty})` };
+}
+
+function renderKatex(katex: KatexLike, opts: EquationOpts): string {
+  try {
+    return katex.renderToString(opts.latex, {
+      displayMode: opts.display ?? true,
+      throwOnError: false,
+      output: "html",
+    });
+  } catch {
+    // KaTeX already swallows most errors with throwOnError:false; this guards
+    // a totally-missing renderToString. Fall back to the raw source.
+    return opts.latex;
+  }
+}
+
+function applyEqStyle(el: HTMLElement, opts: EquationOpts): void {
+  const color = opts.color ?? PALETTE.fg;
+  el.style.position = "absolute";
+  el.style.left = `${opts.x}px`;
+  el.style.top = `${opts.y}px`;
+  el.style.transform = placement(opts).transform;
+  el.style.transformOrigin = "center";
+  el.style.fontSize = `${opts.size ?? 22}px`;
+  el.style.color = rgbCss(color, 1);
+  el.style.opacity = String(clamp01(opts.alpha ?? 1));
+  el.style.pointerEvents = "none";
+  el.style.whiteSpace = "nowrap";
+  el.style.lineHeight = "1";
+  el.style.zIndex = "5";
+}
+
+function equation(
+  katex: KatexLike,
+  container: HTMLElement,
+  opts: EquationOpts,
+): EquationHandle {
+  // The container holds the canvas; make sure it can position the overlay.
+  if (getComputedStyle(container).position === "static") {
+    container.style.position = "relative";
+  }
+  const el = document.createElement("div");
+  el.className = "mira-kit-equation";
+  el.innerHTML = renderKatex(katex, opts);
+  applyEqStyle(el, opts);
+  container.appendChild(el);
+
+  let lastLatex = opts.latex;
+  let lastDisplay = opts.display ?? true;
+
+  return {
+    el,
+    update: (next) => {
+      // Only re-render the math when the source or display mode changes —
+      // positioning/opacity per frame is just cheap style writes.
+      if (next.latex !== lastLatex || (next.display ?? true) !== lastDisplay) {
+        el.innerHTML = renderKatex(katex, next);
+        lastLatex = next.latex;
+        lastDisplay = next.display ?? true;
+      }
+      applyEqStyle(el, next);
+    },
+    remove: () => {
+      el.remove();
+    },
+  };
+}
+
+function equationHtml(
+  katex: KatexLike,
+  opts: EquationOpts,
+): { html: string; left: number; top: number; transform: string } {
+  return {
+    html: renderKatex(katex, opts),
+    left: opts.x,
+    top: opts.y,
+    transform: placement(opts).transform,
+  };
+}
+
 // ── 3D helpers (flat shaded) ────────────────────────────────────────────
 function scene3d(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1341,6 +2106,16 @@ export function createKit(): Kit {
     confidenceBar,
     axes,
     plotLine,
+    axesPro,
+    plot,
+    vector,
+    readout,
+    legend,
+    gridlines,
+    bracket,
+    dimension,
+    equation,
+    equationHtml,
     scene3d,
     flatSphere,
     flatLine,

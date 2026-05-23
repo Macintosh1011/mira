@@ -8,6 +8,7 @@
  * mutate falls back to a fresh "new" generation, which is acceptable.
  */
 import type { ScenePlan, NarrationCue, Renderer } from "@/lib/types";
+import type { SimId, SceneContent } from "./orchestrator";
 
 export interface StoredScene {
   plan: ScenePlan;
@@ -16,6 +17,10 @@ export interface StoredScene {
   narration: NarrationCue[];
   query: string;
   createdAt: number;
+  /** Set when the scene is an interactive sim, so a follow-up keeps the module. */
+  simId?: SimId;
+  /** Set alongside simId: the rich content that drove the sim. */
+  content?: SceneContent;
 }
 
 const TTL_MS = 30 * 60 * 1000;

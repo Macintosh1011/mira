@@ -98,15 +98,109 @@ export interface NarrationCue {
 export interface SceneController {
   /** Advance to (cumulatively reveal up to) the given phase index. */
   setPhase: (phaseIndex: number) => void;
+  /**
+   * Live-tune a named parameter (driven by SceneControls sliders). Optional so
+   * legacy code-string controllers and parameter-free sims don't have to
+   * implement it; the SimHost guards the call.
+   */
+  setParam?: (key: string, value: number) => void;
   /** Tear everything down: remove canvas/renderer, cancel rAF, dispose geometry. */
   dispose: () => void;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   INTERACTIVE SIMULATION CONTRACT
+   ───────────────────────────────────────────────────────────────────────────
+   A `Sim` is a real, hand-built interactive simulation MODULE (e.g. a literal
+   car-following model for "phantom traffic jam"), NOT a generated code string.
+   Sims live in lib/sims/<id>.ts, register in lib/sims/index.ts under their id,
+   and are resolved by the SimHost at render time.
+
+   The orchestrator may emit a `simId` + `SceneContent` instead of `code`; when
+   it does, the SimHost takes the sim path and the legacy code-string path is
+   skipped. Both paths produce a `SceneController` the render host drives the
+   same way (setPhase on the narration beat, setParam on a slider change).
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * One live, user-tunable knob a Sim exposes. The SceneControls panel renders
+ * exactly one slider per spec and calls back through to `setParam(key, value)`.
+ */
+export interface ControlSpec {
+  /** Stable key passed to `SceneController.setParam`. */
+  key: string;
+  /** Human label shown beside the slider. */
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  /** Optional unit suffix shown in the readout (e.g. "s", "%", "cars/km"). */
+  unit?: string;
+}
+
+/**
+ * Structured, model-facing content for a Sim. The orchestrator fills this
+ * (title, per-beat phase copy, initial parameter overrides, an optional
+ * KaTeX equation) and the Sim reads what it needs. `phases` are 1:1 with the
+ * narration cues, exactly like the archetype path's content array.
+ */
+export interface SceneContent {
+  title: string;
+  phases: { label: string; sublabel?: string; value?: string }[];
+  /** Initial parameter overrides keyed by ControlSpec.key (else `default`). */
+  params?: Record<string, number>;
+  /** KaTeX source rendered as an overlay equation, when the sim wants one. */
+  equation?: string;
+}
+
+/**
+ * Libraries injected into every Sim's `create`. Superset of RenderLibs with
+ * `katex` added for equation rendering. Sims receive this; legacy code-string
+ * modules receive the narrower RenderLibs (which SimLibs structurally extends).
+ */
+export interface SimLibs extends RenderLibs {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  katex: any;
+}
+
+/**
+ * A registered interactive simulation. `create` mounts the sim into the
+ * container and returns a SceneController; the host then drives setPhase on the
+ * narration beat and setParam when a control changes. `dispose` must cancel any
+ * rAF, remove canvases/renderers, and free geometry.
+ */
+export interface Sim {
+  /** Stable registry id (e.g. "traffic-jam"). Matches SceneBundle.simId. */
+  id: string;
+  /** Display title (fallback when content.title is absent). */
+  title: string;
+  /** Tunable knobs, one slider each. Empty array for a non-interactive sim. */
+  controls: ControlSpec[];
+  create: (
+    container: HTMLElement,
+    libs: SimLibs,
+    content: SceneContent,
+  ) => SceneController;
 }
 
 export interface SceneBundle {
   sceneId: string;
   renderer: Renderer;
+  /**
+   * Legacy freeform/archetype render body (a `(container, libs) =>
+   * SceneController` body string). Present when the scene is rendered via the
+   * code path; absent when it's rendered via a registered Sim.
+   */
   code: string;
   narration: NarrationCue[];
+  /**
+   * When set, the scene renders through the interactive-sim path: SimHost
+   * resolves `simId` from the SIMS registry and calls its `create` with
+   * `content`. Takes precedence over `code`.
+   */
+  simId?: string;
+  content?: SceneContent;
 }
 
 /** Libraries injected into every generated render module. */

@@ -345,6 +345,217 @@ export interface PlotLineOpts {
   head?: boolean;
 }
 
+/** A 2D point in data space (the units the sim thinks in, not pixels). */
+export interface Point2 {
+  x: number;
+  y: number;
+}
+
+export interface AxesProOpts {
+  /** Plot box: top-left + size, in canvas px. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Data-space domain. Defaults [0,1] on both axes. */
+  xMin?: number;
+  xMax?: number;
+  yMin?: number;
+  yMax?: number;
+  /** Tick count per axis (segments). Defaults 5. */
+  ticks?: number;
+  /** Axis titles (drawn outside the box). */
+  xLabel?: string;
+  yLabel?: string;
+  /** Unit suffix appended to each tick number (e.g. "s", "%"). */
+  xUnit?: string;
+  yUnit?: string;
+  /** Decimal places for tick numbers. Defaults inferred from the domain. */
+  decimals?: number;
+  /** Faint interior gridlines at each tick. Defaults true. */
+  gridlines?: boolean;
+  /** Reveal 0..1 (axes draw on, ticks/labels fade in after). */
+  reveal?: number;
+  color?: RGB;
+}
+
+export interface PlotOpts {
+  /** Plot box matching an `axesPro` call, in canvas px. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Points in DATA space (same domain you passed to `axesPro`). */
+  points: Point2[];
+  /** Data-space domain. Must match the axes for the curve to register. */
+  xMin?: number;
+  xMax?: number;
+  yMin?: number;
+  yMax?: number;
+  /** Draw-on progress 0..1 (the curve unspools left-to-right along the path). */
+  drawProgress?: number;
+  color?: RGB;
+  /** Glowing leading-edge dot. Defaults true. */
+  head?: boolean;
+  /** Stroke weight. Defaults 1.5. */
+  weight?: number;
+  /** Translucent fill from the curve down to the x-axis baseline. */
+  fillArea?: boolean;
+  /** Clip points to the box (off by default — curves may overshoot the frame). */
+  clip?: boolean;
+}
+
+export interface VectorOpts {
+  /** Tail (origin) in canvas px. */
+  x: number;
+  y: number;
+  /** Components in canvas px (dx right, dy down — screen space). */
+  dx: number;
+  dy: number;
+  color?: RGB;
+  /** Text drawn at the head. If omitted, no label. Pass "" for none. */
+  label?: string;
+  /** Append the numeric magnitude |v| after the label. Defaults false. */
+  showMagnitude?: boolean;
+  /** Reveal 0..1 (shaft draws on, head + label fade in). */
+  reveal?: number;
+  /** Arrowhead size in px. Defaults 10. */
+  headSize?: number;
+  /** Stroke weight. Defaults 1.5. */
+  weight?: number;
+  /** Decimals for the magnitude readout. Defaults 1. */
+  decimals?: number;
+}
+
+export interface ReadoutOpts {
+  x: number;
+  y: number;
+  /** Uppercase mono caption above the value. */
+  label: string;
+  /** The value — number or pre-formatted string. */
+  value: number | string;
+  /** Unit suffix (e.g. "Hz", "m/s"). */
+  unit?: string;
+  color?: RGB;
+  /** Decimals when `value` is a number. Defaults 2. */
+  decimals?: number;
+  /** Value text size. Defaults 24. */
+  size?: number;
+  align?: "left" | "center" | "right";
+  /** Reveal 0..1 (fade + small rise). */
+  reveal?: number;
+  /** Draw a faint card behind the readout. Defaults false. */
+  boxed?: boolean;
+}
+
+export interface LegendItem {
+  color: RGB;
+  label: string;
+}
+
+export interface LegendOpts {
+  /** Top-left of the legend block, in canvas px. */
+  x: number;
+  y: number;
+  items: LegendItem[];
+  /** Row height in px. Defaults 22. */
+  rowH?: number;
+  /** Swatch style. "line" = dash, "dot" = filled circle. Defaults "line". */
+  swatch?: "line" | "dot";
+  /** Reveal 0..1 (rows stagger in). */
+  reveal?: number;
+  /** Draw a faint card behind the legend. Defaults false. */
+  boxed?: boolean;
+}
+
+export interface GridlinesOpts {
+  /** Plot box, in canvas px. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Vertical line count. Defaults 8. */
+  cols?: number;
+  /** Horizontal line count. Defaults 5. */
+  rows?: number;
+  color?: RGB;
+  /** Line opacity 0..1. Defaults 0.05. */
+  alpha?: number;
+  /** Reveal 0..1. */
+  reveal?: number;
+}
+
+export interface BracketOpts {
+  /** Span endpoints in canvas px. The bracket runs from (x1,y1) to (x2,y2). */
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  /** Perpendicular depth of the bracket lips in px. Defaults 8. */
+  depth?: number;
+  /** Optional label drawn at the bracket's mid-span, outside the lips. */
+  label?: string;
+  color?: RGB;
+  /** Reveal 0..1. */
+  reveal?: number;
+  /** Flip which side the lips/label sit on. Defaults false. */
+  flip?: boolean;
+}
+
+export interface DimensionOpts {
+  /** Measured span endpoints in canvas px. */
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  /** Value drawn at the mid-span (number formatted, or a string). */
+  value: number | string;
+  /** Unit suffix when `value` is a number. */
+  unit?: string;
+  /** Offset of the dimension line from the span, perpendicular, in px. */
+  offset?: number;
+  color?: RGB;
+  /** Decimals when `value` is a number. Defaults 1. */
+  decimals?: number;
+  /** Reveal 0..1 (extension + dim line draw on, value fades in). */
+  reveal?: number;
+}
+
+/** Minimal shape of the KaTeX namespace the kit needs (sim passes `libs.katex`). */
+export interface KatexLike {
+  renderToString: (tex: string, options?: Record<string, unknown>) => string;
+}
+
+export interface EquationOpts {
+  /** Anchor in canvas px (interpreted per `align` / `baseline`). */
+  x: number;
+  y: number;
+  /** The LaTeX source (no surrounding $). */
+  latex: string;
+  /** Font size in px. Defaults 22. */
+  size?: number;
+  /** Text color. Defaults palette.fg. */
+  color?: RGB;
+  /** Opacity 0..1. Defaults 1. */
+  alpha?: number;
+  /** Horizontal anchor. Defaults "center". */
+  align?: "left" | "center" | "right";
+  /** Vertical anchor of (x,y) against the box. Defaults "middle". */
+  baseline?: "top" | "middle" | "bottom";
+  /** Render display (block) math vs inline. Defaults true (display). */
+  display?: boolean;
+}
+
+/** Handle returned by `kit.equation` for managing a single overlaid equation. */
+export interface EquationHandle {
+  /** The overlay DOM node (a positioned <div> inside the canvas container). */
+  el: HTMLElement;
+  /** Re-render with new options (cheap; reuses the same node). */
+  update: (opts: EquationOpts) => void;
+  /** Remove the node from the DOM. Call on scene dispose. */
+  remove: () => void;
+}
+
 /** Small flat-shaded 3D helper set (three.js), for genuinely spatial scenes. */
 export interface Scene3D {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -420,6 +631,44 @@ export interface Kit {
   // ── chart vocabulary ──────────────────────────────────────────────
   axes: (p: P5, opts: AxesOpts) => void;
   plotLine: (p: P5, opts: PlotLineOpts) => void;
+
+  // ── technical vocabulary (charts / physics / readouts) ────────────
+  /** Labeled axes with tick marks + numeric units over a data domain. */
+  axesPro: (p: P5, opts: AxesProOpts) => void;
+  /** A line/curve plot mapped from a data domain, drawing on with a glow head. */
+  plot: (p: P5, opts: PlotOpts) => void;
+  /** An arrow/vector in screen space with an optional magnitude label. */
+  vector: (p: P5, opts: VectorOpts) => void;
+  /** A technical numeric readout (mono caption + big value + unit). */
+  readout: (p: P5, opts: ReadoutOpts) => void;
+  /** A color-keyed legend block. */
+  legend: (p: P5, opts: LegendOpts) => void;
+  /** Standalone interior gridlines (no axes). */
+  gridlines: (p: P5, opts: GridlinesOpts) => void;
+  /** A span bracket with an optional label (annotates a range). */
+  bracket: (p: P5, opts: BracketOpts) => void;
+  /** An engineering dimension line (extension lines + value at mid-span). */
+  dimension: (p: P5, opts: DimensionOpts) => void;
+  /**
+   * Render a LaTeX equation as a positioned HTML overlay above the canvas.
+   * Pass the KaTeX namespace (the host injects it as `libs.katex`) and the p5
+   * container so the kit can place the overlay over the canvas. Returns a
+   * handle you reuse across frames (call `.update` per frame, `.remove` on
+   * dispose) — see the doc on the implementation for why this beats canvas.
+   */
+  equation: (
+    katex: KatexLike,
+    container: HTMLElement,
+    opts: EquationOpts,
+  ) => EquationHandle;
+  /**
+   * Pure helper: KaTeX → HTML string + intended absolute placement. For hosts
+   * that own their own overlay layer and don't want the kit touching the DOM.
+   */
+  equationHtml: (
+    katex: KatexLike,
+    opts: EquationOpts,
+  ) => { html: string; left: number; top: number; transform: string };
 
   // ── 3D ────────────────────────────────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

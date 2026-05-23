@@ -11,7 +11,12 @@ import NNCanvas from "@/components/canvas/NNCanvas";
 import FedCanvas from "@/components/canvas/FedCanvas";
 import { PhaseIndicator } from "@/components/canvas/CanvasShared";
 import RenderHost from "@/lib/render/RenderHost";
+import SimHost from "@/lib/render/SimHost";
+import SceneControls from "@/components/SceneControls";
+import { getSim } from "@/lib/sims";
+import { loadRenderLibs } from "@/lib/render/libs";
 import { RECENTS } from "@/lib/topics";
+import type { ControlSpec } from "@/lib/types";
 
 // three touches `window`; keep it out of SSR and the main bundle. Falls back to
 // the faint CSS grain while the WebGL backdrop loads.
@@ -47,6 +52,59 @@ export default function Page() {
   } = session;
 
   const [controlsVisible, setControlsVisible] = useState(false);
+
+  // ── Interactive-sim controls ────────────────────────────────────────
+  // When the active scene is sim-rendered, resolve its ControlSpecs and hold
+  // the live param values here (the single source of truth the SimHost reads
+  // and the SceneControls writes). Re-seeds whenever the scene changes.
+  const simId = scene?.kind === "live" ? scene.simId ?? null : null;
+  const [simControls, setSimControls] = useState<ControlSpec[]>([]);
+  const [simParams, setSimParams] = useState<Record<string, number>>({});
+  const [equationHtml, setEquationHtml] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const content = scene?.content;
+    // Resolve controls (async, so setState lands in a microtask — never a
+    // synchronous cascading render). No sim → empty controls + cleared params.
+    const resolve = simId
+      ? getSim(simId)
+      : Promise.resolve(null);
+    resolve.then((sim) => {
+      if (cancelled) return;
+      const controls = sim?.controls ?? [];
+      setSimControls(controls);
+      setSimParams(
+        Object.fromEntries(
+          controls.map((c) => [c.key, content?.params?.[c.key] ?? c.default]),
+        ),
+      );
+    });
+    // Render the optional equation off the shared katex bundle (async too).
+    const eq = simId ? content?.equation : undefined;
+    loadRenderLibs().then((libs) => {
+      if (cancelled) return;
+      if (!eq) {
+        setEquationHtml(null);
+        return;
+      }
+      try {
+        setEquationHtml(
+          libs.katex.renderToString(eq, {
+            throwOnError: false,
+            displayMode: true,
+          }),
+        );
+      } catch {
+        setEquationHtml(null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Re-seed when the simId or the underlying scene (its renderRev) changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simId, scene?.renderRev]);
 
   const isLive = phase === "playing" || phase === "paused" || phase === "morphing";
   // Keep the prior scene mounted while a follow-up generates over it.
@@ -158,13 +216,25 @@ export default function Page() {
           )}
           {scene.kind === "live" && (
             <div className={`canvas-wrap show ${canvasDimmed ? "dimmed" : ""}`}>
-              <RenderHost
-                key={scene.renderRev}
-                code={scene.code ?? null}
-                remountKey={scene.renderRev}
-                playing={phase !== "paused"}
-                phase={canvasPhase}
-              />
+              {scene.simId && scene.content ? (
+                <SimHost
+                  key={scene.renderRev}
+                  simId={scene.simId}
+                  content={scene.content}
+                  remountKey={scene.renderRev}
+                  playing={phase !== "paused"}
+                  phase={canvasPhase}
+                  params={simParams}
+                />
+              ) : (
+                <RenderHost
+                  key={scene.renderRev}
+                  code={scene.code ?? null}
+                  remountKey={scene.renderRev}
+                  playing={phase !== "paused"}
+                  phase={canvasPhase}
+                />
+              )}
               <PhaseIndicator
                 phase={canvasPhase}
                 total={scene.phaseLabels.length}
@@ -220,6 +290,22 @@ export default function Page() {
           <MessageSquarePlus size={16} strokeWidth={1.5} />
         </button>
       </div>
+
+      {/* Interactive-sim slider panel — only while a sim scene plays/pauses */}
+      {(phase === "playing" || phase === "paused") &&
+        scene?.kind === "live" &&
+        scene.simId &&
+        simControls.length > 0 && (
+          <SceneControls
+            controls={simControls}
+            values={simParams}
+            equationHtml={equationHtml}
+            visible={controlsVisible}
+            onChange={(key, value) =>
+              setSimParams((prev) => ({ ...prev, [key]: value }))
+            }
+          />
+        )}
 
       {/* Backdrop (dim click-to-close; hidden during morphing so canvas shows) */}
       <div

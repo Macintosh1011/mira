@@ -5,18 +5,23 @@
  * one JSON per `data:` line, in order:
  *   plan -> code_chunk* -> code_done -> narration* -> verify? -> done
  *
- * Flow + failure handling. The narration the user HEARS always matches their
- * query; only the SCENE CODE ever falls back:
- *  - A genuine keyword match to a hand-authored bundle (a hero query) replays
- *    that bundle whole — scene AND its narration. This is the ONLY path that
- *    serves a cached topic's narration, and only when it truly matches.
- *  - Otherwise the REAL orchestrator plan and the REAL narration cues are always
- *    streamed. If live codegen fails / times out, we swap only the scene code
- *    for an on-topic generic scene built deterministically from the plan, never
- *    an off-topic cached bundle.
- *  - No API key -> the generic scene over a minimal plan derived from the query.
+ * Three resolve lanes, in priority order. The narration the user HEARS always
+ * matches their query; only the SCENE CODE ever falls back:
+ *  1. SIM lane — when the orchestrator classifies the query to one of the 10
+ *     interactive simulation modules, we stream the plan + REAL narration and a
+ *     `done` bundle carrying `{ simId, content }` (the sim renders itself; no
+ *     code is generated). The SSE order + 1:1 narration guarantee is preserved.
+ *  2. HERO cache lane — a genuine keyword match to a hand-authored bundle replays
+ *     it whole (scene AND its narration). This is the ONLY path that serves a
+ *     cached topic's narration, and only when it truly matches.
+ *  3. ARCHETYPE lane — for non-sim novel queries, the REAL orchestrator plan and
+ *     REAL narration are streamed over a deterministic hand-tuned archetype.
+ *
+ * If live codegen/planning fails or times out we swap only the scene code for an
+ * on-topic generic scene built from the plan, never an off-topic cached bundle.
+ *  - No API key -> the archetype scene over a minimal plan derived from the query.
  *  - mode "mutate" with a known previousSceneId -> orchestrator morphs the prior
- *    plan and codegen evolves the prior code; otherwise it's a fresh "new" run.
+ *    plan/sim and codegen evolves the prior code; otherwise it's a fresh "new" run.
  *  - The managed-agents verifier is best-effort and time-boxed: we emit `verify`
  *    only if it returns before the done deadline, and NEVER block `done` on it.
  */
@@ -29,7 +34,12 @@ import type {
   Renderer,
 } from "@/lib/types";
 import { hasGeminiKey, withDeadline } from "@/lib/gemini";
-import { planScene, planRenderer } from "@/lib/agents/orchestrator";
+import {
+  orchestrate,
+  planRenderer,
+  isSimPlan,
+  type SimPlan,
+} from "@/lib/agents/orchestrator";
 import { generateCode, looksRunnable } from "@/lib/agents/codegen";
 import {
   generateNarration,
@@ -50,11 +60,11 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * Live-generation budgets. The DEFAULT scene is now a deterministic, hand-tuned
- * ARCHETYPE filled with the plan's structured content — no flaky model codegen
- * in the hot path. Freeform codegen is only a last resort if an archetype ever
- * fails its runnable check, so its budget is tight. maxDuration (60s) leaves
- * headroom for narration + verify.
+ * Live-generation budgets. SIM content and the archetype scene are the fast
+ * default paths (no flaky freeform codegen in the hot loop). Freeform codegen is
+ * a last resort if an archetype ever fails its runnable check, so its budget is
+ * tight. maxDuration (60s) leaves headroom for narration + verify; the whole
+ * happy path targets ~30s.
  */
 const PLAN_BUDGET_MS = 12_000;
 const CODE_BUDGET_MS = 20_000;
@@ -91,8 +101,60 @@ function minimalPlan(query: string): ScenePlan {
 }
 
 /**
+ * A synthetic ScenePlan describing a sim's phases, so the existing narration
+ * agent (which speaks one cue per phase) works unchanged for the sim lane. The
+ * plan's content mirrors the sim's phase content 1:1.
+ */
+function planForSim(sim: SimPlan, query: string): ScenePlan {
+  return {
+    id: `sim-${sim.simId}-${Date.now().toString(36)}`,
+    title: sim.content.title || query.slice(0, 48) || sim.simId,
+    sceneType: "flow",
+    content: sim.content.phases.map((ph) => ({
+      label: ph.label,
+      sublabel: ph.sublabel,
+      value: ph.value,
+    })),
+    phases: sim.phases,
+  };
+}
+
+/**
+ * Stream an interactive SIM: the plan, the REAL narration cues (1:1 with the
+ * sim's phases), and a `done` bundle carrying `{ simId, content }` with NO code
+ * (the sim module renders itself). SSE order matches the contract; a placeholder
+ * code_chunk/code_done keep the event sequence intact for consumers that gate on
+ * code_done before driving phases.
+ */
+function streamSimScene(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  sim: SimPlan,
+  plan: ScenePlan,
+  narration: NarrationCue[],
+): SceneBundle {
+  const sceneId = plan.id;
+  const renderer: Renderer = "2d";
+  controller.enqueue(sse({ type: "plan", plan }));
+  // Sims carry no generated code; emit empty code events to preserve order.
+  controller.enqueue(sse({ type: "code_chunk", sceneId, delta: "" }));
+  controller.enqueue(sse({ type: "code_done", sceneId, code: "", renderer }));
+  for (const cue of narration) {
+    controller.enqueue(sse({ type: "narration", cue }));
+  }
+  const bundle: SceneBundle = {
+    sceneId,
+    renderer,
+    code: "",
+    narration,
+    simId: sim.simId,
+    content: sim.content,
+  };
+  return bundle;
+}
+
+/**
  * Stream the hand-tuned ARCHETYPE scene for a real plan, with the real narration
- * cues. This is the default for novel queries: deterministic, on-topic, and
+ * cues. The default for novel non-sim queries: deterministic, on-topic, and
  * reference-quality. The render stage is never blank and never off-topic.
  */
 function streamArchetypeScene(
@@ -181,16 +243,17 @@ async function runGeneration(
       ? getScene(req.previousSceneId)
       : undefined;
 
-  // 1) PLAN (structured): title + sceneType (archetype) + per-phase content.
-  // On failure we keep the user on-topic with a minimal plan + archetype scene
-  // rather than a wrong cached topic.
-  let plan;
+  // 1) ORCHESTRATE: classify to a SIM module or fall back to an ARCHETYPE plan.
+  // On failure we keep the user on-topic with a minimal archetype plan rather
+  // than a wrong cached topic.
+  let result;
   try {
-    plan = await withDeadline(PLAN_BUDGET_MS, (signal) =>
-      planScene({
+    result = await withDeadline(PLAN_BUDGET_MS, (signal) =>
+      orchestrate({
         query,
         abortSignal: signal,
         previousPlan: prior?.plan,
+        previousSimId: prior?.simId,
       }),
     );
   } catch {
@@ -198,6 +261,43 @@ async function runGeneration(
     streamArchetypeScene(controller, fallback, narrationFromPlan(fallback));
     return;
   }
+
+  // ── SIM lane ───────────────────────────────────────────────────────────
+  if (isSimPlan(result)) {
+    const sim = result;
+    const plan = planForSim(sim, query);
+
+    // REAL narration, 1:1 with the sim's phases. On failure derive from phases.
+    let narration: NarrationCue[];
+    try {
+      narration = await withDeadline(PLAN_BUDGET_MS, (signal) =>
+        generateNarration({ plan, query, abortSignal: signal }),
+      );
+    } catch {
+      narration = narrationFromPlan(plan);
+    }
+
+    const bundle = streamSimScene(controller, sim, plan, narration);
+
+    // Persist for follow-up mutate (keeps the same module + content shape).
+    putScene({
+      plan,
+      code: "",
+      renderer: "2d",
+      narration,
+      query,
+      createdAt: Date.now(),
+      simId: sim.simId,
+      content: sim.content,
+    });
+
+    await emitVerify(controller, { code: "", renderer: "2d", narration });
+    controller.enqueue(sse({ type: "done", bundle }));
+    return;
+  }
+
+  // ── ARCHETYPE lane ───────────────────────────────────────────────────────
+  const plan: ScenePlan = result;
   if (!plan.phases.length) {
     const fallback = minimalPlan(query);
     streamArchetypeScene(controller, fallback, narrationFromPlan(fallback));
@@ -228,7 +328,7 @@ async function runGeneration(
   controller.enqueue(sse({ type: "code_chunk", sceneId, delta: code }));
   if (!looksRunnable(code)) {
     try {
-      const result = await withDeadline(CODE_BUDGET_MS, (signal) =>
+      const codeResult = await withDeadline(CODE_BUDGET_MS, (signal) =>
         generateCode({
           plan,
           abortSignal: signal,
@@ -238,7 +338,7 @@ async function runGeneration(
           },
         }),
       );
-      if (looksRunnable(result.code)) code = result.code;
+      if (looksRunnable(codeResult.code)) code = codeResult.code;
     } catch {
       /* keep the archetype code (already on-topic) */
     }
@@ -262,24 +362,29 @@ async function runGeneration(
     createdAt: Date.now(),
   });
 
-  // 4) VERIFY (managed agents, best-effort, NON-BLOCKING). Race against a hard
-  // deadline; emit verify only if it returns in time. Never block done on it.
-  const verifyPromise = verifyScene({ code, renderer, narration });
+  await emitVerify(controller, { code, renderer, narration });
+  controller.enqueue(sse({ type: "done", bundle }));
+}
+
+/**
+ * VERIFY (managed agents, best-effort, NON-BLOCKING). Race against a hard
+ * deadline; emit verify only if it returns in time. Never block done on it. The
+ * verifyPromise keeps running but its result is ignored after the deadline.
+ */
+async function emitVerify(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  scene: { code: string; renderer: Renderer; narration: NarrationCue[] },
+): Promise<void> {
+  const verifyPromise = verifyScene(scene);
   const timeout = new Promise<null>((resolve) =>
     setTimeout(() => resolve(null), VERIFY_DEADLINE_MS),
   );
   const verdict = await Promise.race([verifyPromise, timeout]);
-  // Real managed-agent verdict if it returned in time; otherwise degrade to a
-  // passing verify so the UI always sees the contract's verify event. The
-  // verifyPromise keeps running but its result is ignored after the deadline.
   controller.enqueue(
     verdict
       ? sse({ type: "verify", status: verdict.status, note: verdict.note })
       : sse({ type: "verify", status: "ok" }),
   );
-
-  // 5) DONE — always emitted.
-  controller.enqueue(sse({ type: "done", bundle }));
 }
 
 export async function POST(request: Request): Promise<Response> {

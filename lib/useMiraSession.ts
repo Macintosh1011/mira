@@ -5,6 +5,7 @@ import type {
   GenerateEvent,
   NarrationCue,
   Renderer,
+  SceneContent,
 } from "@/lib/types";
 import { streamGenerate, type GenerateHandle } from "@/lib/sse";
 import { Narrator } from "@/lib/voice/tts";
@@ -39,9 +40,17 @@ export interface ActiveScene {
   cues: NarrationCue[];
   /** Topic SVG canvas component name, when kind === "topic". */
   canvas?: Topic["canvas"];
-  /** Generated code body, when kind === "live". */
+  /** Generated code body, when kind === "live" and no sim is attached. */
   code?: string;
   renderer?: Renderer;
+  /**
+   * Interactive-sim id, when the scene renders through the sim path. Takes
+   * precedence over `code`: the page mounts SimHost(simId, content) instead of
+   * RenderHost(code).
+   */
+  simId?: string;
+  /** Structured per-beat content + initial params + equation for the sim. */
+  content?: SceneContent;
   /** Bumped on each fresh live scene to force a clean render remount. */
   renderRev: number;
 }
@@ -145,10 +154,13 @@ export function useMiraSession(): MiraSession {
   const sttRef = useRef<STTHandle | null>(null);
   const renderRevRef = useRef(0);
   // Live generation accumulates code + cues; promote to a scene on `done`.
+  // `done` may also carry a simId + content (interactive-sim path).
   const liveRef = useRef<{
     code: string;
     renderer: Renderer;
     cues: NarrationCue[];
+    simId?: string;
+    content?: SceneContent;
   } | null>(null);
 
   // Lazily construct the Narrator on the client. Each cue activation drives the
@@ -253,19 +265,28 @@ export function useMiraSession(): MiraSession {
               live.code = event.bundle.code;
               live.renderer = event.bundle.renderer;
               live.cues = event.bundle.narration;
+              live.simId = event.bundle.simId;
+              live.content = event.bundle.content;
               renderRevRef.current += 1;
               const cues = [...live.cues].sort(
                 (a, b) => a.startMs - b.startMs,
               );
-              // One canvas phase per narration cue, advanced in lockstep by the
-              // Narrator's onCue.
+              // Sim path: prefer the content's per-beat labels for the phase
+              // indicator; else fall back to "phase N". One canvas phase per
+              // narration cue, advanced in lockstep by the Narrator's onCue.
+              const phaseLabels =
+                live.content?.phases?.length === cues.length
+                  ? live.content.phases.map((p) => p.label)
+                  : cues.map((_, i) => `phase ${i + 1}`);
               startPlaying({
                 kind: "live",
-                label: query.slice(0, 40),
-                phaseLabels: cues.map((_, i) => `phase ${i + 1}`),
+                label: live.content?.title?.slice(0, 40) ?? query.slice(0, 40),
+                phaseLabels,
                 cues,
                 code: live.code,
                 renderer: live.renderer,
+                simId: live.simId,
+                content: live.content,
                 renderRev: renderRevRef.current,
               });
             }

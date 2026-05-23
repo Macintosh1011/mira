@@ -48,3 +48,9 @@ next-env.d.ts
 
 # local claude tooling config
 .claude/
+
+# agent debris
+.qa-tmp/
+app/__simtest/
+/sig-rc2.png
+/signal-rc.png

@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
 
 /* ────────────────────────────────────────────────────────────────
    Mira — design tokens (ported verbatim from the design handoff).
@@ -686,6 +687,142 @@ input::placeholder {
 .state-badge.live .sb-dot {
   background: var(--accent);
   animation: dotBreath 1600ms var(--ease-pulse) infinite;
+}
+
+/* ─────────────────────────────────────────────────────────── */
+/*  Scene controls (interactive-sim slider panel, bottom-right) */
+/* ─────────────────────────────────────────────────────────── */
+
+.scene-controls {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 60;
+  width: 260px;
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 16px;
+  border-radius: 14px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 16px 48px rgba(0, 0, 0, 0.55);
+  color: var(--fg);
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 240ms var(--ease-default),
+    transform 240ms var(--ease-smooth);
+}
+.scene-controls.show {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.scene-controls .sc-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.scene-controls .sc-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.scene-controls .sc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px 0 var(--accent-glow);
+}
+
+.scene-controls .sc-eq {
+  font-size: 15px;
+  color: var(--fg);
+  text-align: center;
+  padding: 6px 2px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.scene-controls .sc-eq .katex {
+  color: var(--fg);
+}
+
+.scene-controls .sc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.scene-controls .sc-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.scene-controls .sc-lbl {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.scene-controls .sc-key {
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+}
+.scene-controls .sc-val {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.scene-controls .sc-unit {
+  color: var(--fg-subtle);
+  margin-left: 2px;
+}
+
+.scene-controls .sc-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  /* track fill set inline (accent up to the value, faint track after) */
+}
+.scene-controls .sc-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 8px 0 var(--accent-glow);
+  cursor: pointer;
+  transition: transform 120ms var(--ease-default);
+}
+.scene-controls .sc-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.scene-controls .sc-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 8px 0 var(--accent-glow);
+  cursor: pointer;
 }
 
 @media (prefers-reduced-motion: reduce) {
