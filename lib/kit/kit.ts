@@ -610,9 +610,17 @@ function arrowEdge(
   if (curve === 0) {
     p.line(opts.x1, opts.y1, ex, ey);
   } else {
+    // Sample the quadratic Bézier into vertices — quadraticVertex was removed
+    // in p5 2.x, so build the curve manually to stay version-agnostic.
     p.beginShape();
     p.vertex(opts.x1, opts.y1);
-    p.quadraticVertex(mx, my, ex, ey);
+    const baseSegs = 24;
+    for (let i = 1; i <= baseSegs; i++) {
+      const s = i / baseSegs;
+      const bx = lerp(lerp(opts.x1, mx, s), lerp(mx, ex, s), s);
+      const by = lerp(lerp(opts.y1, my, s), lerp(my, ey, s), s);
+      p.vertex(bx, by);
+    }
     p.endShape();
   }
 
