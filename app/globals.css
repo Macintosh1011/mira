@@ -128,14 +128,40 @@ input::placeholder {
 /* ─────────────────────────────────────────────────────────── */
 .noise-field {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* A bottom-anchored band: a glowing yellow "horizon" beneath the CTA, the
+     upper viewport (wordmark/tagline/⌘K) staying on clean dark. */
+  height: 36vh;
   z-index: 0;
   pointer-events: none;
   opacity: 0;
   transition: opacity 800ms var(--ease-smooth);
+  /* Fade the top edge of the band into the dark so there's no hard seam — the
+     field melts upward into the background instead of cutting off. */
+  -webkit-mask-image: linear-gradient(
+    to top,
+    #000 0%,
+    #000 46%,
+    rgba(0, 0, 0, 0.55) 72%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to top,
+    #000 0%,
+    #000 46%,
+    rgba(0, 0, 0, 0.55) 72%,
+    transparent 100%
+  );
 }
 .noise-field[data-faded="in"] {
   opacity: 1;
+}
+@media (max-width: 640px) {
+  .noise-field {
+    height: 32vh;
+  }
 }
 
 /* ─────────────────────────────────────────────────────────── */

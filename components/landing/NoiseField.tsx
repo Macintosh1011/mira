@@ -6,188 +6,154 @@ import type * as THREE_NS from "three";
 /**
  * NoiseField — the LANDING (empty) state backdrop only.
  *
- * A slow, organic Perlin/simplex-displaced wireframe surface, post-processed
- * with an ordered (Bayer) dither for an editorial, print-grain feel and a
- * radial vignette that keeps the center (wordmark/tagline/⌘K) dark and crisp.
+ * An exact port of prophet's PerlinHero: a clean amber wireframe terrain
+ * (#f59e0b @ 0.55) over a dark ghost surface (#161b22 @ 0.7), undulating with a
+ * two-octave 3D simplex noise, set in fog (#0a0d12, 14→42). No dither, no Bayer
+ * pass, no color ramp — just the wireframe + ghost + fog.
+ *
+ * Seated as a bottom-anchored horizon band (the CSS `.noise-field` block sizes
+ * it to ~36vh and fades its top edge into the dark), so prophet's terrain glows
+ * along the bottom of the viewport and melts upward into the page, leaving the
+ * wordmark / tagline / ⌘K pill on clean dark background.
  *
  * three touches `window`, so it's dynamic-imported in the effect, exactly like
  * lib/render/libs.ts — never at module top level. The whole pipeline (renderer,
- * scene, geometry, materials, render targets, rAF, listeners) is torn down on
- * unmount so switching out of the empty state leaks no WebGL context.
+ * scene, geometry, materials, wireframe, rAF, listeners) is torn down on unmount
+ * so switching out of the empty state leaks no WebGL context.
  *
  * Honors prefers-reduced-motion (single static frame) and pauses rAF when the
  * tab is hidden.
  */
 
-// ── GLSL ──────────────────────────────────────────────────────────────────
+// ── Inlined 3D simplex noise ─────────────────────────────────────────────────
 //
-// Simplex 3D noise (Ashima / Stefan Gustavson, public domain) drives the
-// vertex displacement so the surface undulates slowly and organically.
+// Public-domain simplex noise (Stefan Gustavson / Ashima "webgl-noise" lineage),
+// the same algorithm the `simplex-noise` npm package implements as
+// `createNoise3D`. Inlined here so we don't add a dependency mid-build. Returns
+// smooth values in roughly [-1, 1]; we use it exactly as `noise3D(x, y, z)`.
+//
+// A fixed permutation table is used (rather than a per-instance random seed);
+// for a continuously-drifting terrain the seed is immaterial to the look.
 
-const SIMPLEX_GLSL = /* glsl */ `
-vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
-vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+function buildNoise3D(): (x: number, y: number, z: number) => number {
+  const grad3 = new Float32Array([
+    1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
+    1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
+    0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
+  ]);
 
-float snoise(vec3 v){
-  const vec2 C=vec2(1.0/6.0,1.0/3.0);
-  const vec4 D=vec4(0.0,0.5,1.0,2.0);
-  vec3 i=floor(v+dot(v,C.yyy));
-  vec3 x0=v-i+dot(i,C.xxx);
-  vec3 g=step(x0.yzx,x0.xyz);
-  vec3 l=1.0-g;
-  vec3 i1=min(g.xyz,l.zxy);
-  vec3 i2=max(g.xyz,l.zxy);
-  vec3 x1=x0-i1+C.xxx;
-  vec3 x2=x0-i2+C.yyy;
-  vec3 x3=x0-D.yyy;
-  i=mod289(i);
-  vec4 p=permute(permute(permute(
-        i.z+vec4(0.0,i1.z,i2.z,1.0))
-      + i.y+vec4(0.0,i1.y,i2.y,1.0))
-      + i.x+vec4(0.0,i1.x,i2.x,1.0));
-  float n_=0.142857142857;
-  vec3 ns=n_*D.wyz-D.xzx;
-  vec4 j=p-49.0*floor(p*ns.z*ns.z);
-  vec4 x_=floor(j*ns.z);
-  vec4 y_=floor(j-7.0*x_);
-  vec4 x=x_*ns.x+ns.yyyy;
-  vec4 y=y_*ns.x+ns.yyyy;
-  vec4 h=1.0-abs(x)-abs(y);
-  vec4 b0=vec4(x.xy,y.xy);
-  vec4 b1=vec4(x.zw,y.zw);
-  vec4 s0=floor(b0)*2.0+1.0;
-  vec4 s1=floor(b1)*2.0+1.0;
-  vec4 sh=-step(h,vec4(0.0));
-  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy;
-  vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
-  vec3 p0=vec3(a0.xy,h.x);
-  vec3 p1=vec3(a0.zw,h.y);
-  vec3 p2=vec3(a1.xy,h.z);
-  vec3 p3=vec3(a1.zw,h.w);
-  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
-  p0*=norm.x;p1*=norm.y;p2*=norm.z;p3*=norm.w;
-  vec4 m=max(0.6-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
-  m=m*m;
-  return 42.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
-}
-`;
+  const p = [
+    151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140,
+    36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148, 247, 120,
+    234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32, 57, 177, 33,
+    88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175, 74, 165, 71,
+    134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111, 229, 122, 60, 211, 133,
+    230, 220, 105, 92, 41, 55, 46, 245, 40, 244, 102, 143, 54, 65, 25, 63, 161,
+    1, 216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196, 135, 130,
+    116, 188, 159, 86, 164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250,
+    124, 123, 5, 202, 38, 147, 118, 126, 255, 82, 85, 212, 207, 206, 59, 227,
+    47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170, 213, 119, 248, 152, 2, 44,
+    154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39, 253, 19, 98,
+    108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228, 251, 34,
+    242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14,
+    239, 107, 49, 192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121,
+    50, 45, 127, 4, 150, 254, 138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243,
+    141, 128, 195, 78, 66, 215, 61, 156, 180,
+  ];
 
-const MESH_VERT = /* glsl */ `
-uniform float uTime;
-uniform float uAmp;
-varying float vElev;
+  const perm = new Uint8Array(512);
+  const permMod12 = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) {
+    perm[i] = p[i & 255];
+    permMod12[i] = perm[i] % 12;
+  }
 
-${SIMPLEX_GLSL}
+  const F3 = 1 / 3;
+  const G3 = 1 / 6;
 
-float fbm(vec3 p){
-  float a=0.0;
-  a+=snoise(p)*0.62;
-  a+=snoise(p*2.07+13.1)*0.28;
-  a+=snoise(p*4.13+41.7)*0.12;
-  return a;
-}
+  return function noise3D(xin: number, yin: number, zin: number): number {
+    const s = (xin + yin + zin) * F3;
+    const i = Math.floor(xin + s);
+    const j = Math.floor(yin + s);
+    const k = Math.floor(zin + s);
 
-void main(){
-  vec3 pos=position;
-  // Two layered, slow-drifting octaves give an organic, breathing surface.
-  float t=uTime*0.045;
-  float e=fbm(vec3(pos.x*0.42, pos.y*0.42, t));
-  e+=fbm(vec3(pos.x*0.17-9.0, pos.y*0.17+4.0, t*0.6))*0.5;
-  vElev=e;
-  pos.z+=e*uAmp;
-  gl_Position=projectionMatrix*modelViewMatrix*vec4(pos,1.0);
-}
-`;
+    const t = (i + j + k) * G3;
+    const x0 = xin - (i - t);
+    const y0 = yin - (j - t);
+    const z0 = zin - (k - t);
 
-// Monochrome surface. Elevation drives a near-black -> faint-grey ramp; the
-// warm accent bleeds in only at the extreme peaks/troughs at very low intensity.
-const MESH_FRAG = /* glsl */ `
-precision highp float;
-uniform vec3 uBase;
-uniform vec3 uHi;
-uniform vec3 uAccent;
-varying float vElev;
+    let i1: number, j1: number, k1: number;
+    let i2: number, j2: number, k2: number;
+    if (x0 >= y0) {
+      if (y0 >= z0) {
+        i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0;
+      } else if (x0 >= z0) {
+        i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1;
+      } else {
+        i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1;
+      }
+    } else {
+      if (y0 < z0) {
+        i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1;
+      } else if (x0 < z0) {
+        i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1;
+      } else {
+        i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0;
+      }
+    }
 
-void main(){
-  float e=clamp(vElev*0.5+0.5,0.0,1.0);
-  vec3 col=mix(uBase,uHi,smoothstep(0.05,0.92,e));
-  // Accent only kisses the extremes — barely-there warm texture, never a glow.
-  float edge=smoothstep(0.72,1.0,abs(vElev));
-  col=mix(col,uAccent,edge*0.12);
-  gl_FragColor=vec4(col,1.0);
-}
-`;
+    const x1 = x0 - i1 + G3;
+    const y1 = y0 - j1 + G3;
+    const z1 = z0 - k1 + G3;
+    const x2 = x0 - i2 + 2 * G3;
+    const y2 = y0 - j2 + 2 * G3;
+    const z2 = z0 - k2 + 2 * G3;
+    const x3 = x0 - 1 + 3 * G3;
+    const y3 = y0 - 1 + 3 * G3;
+    const z3 = z0 - 1 + 3 * G3;
 
-const QUAD_VERT = /* glsl */ `
-varying vec2 vUv;
-void main(){
-  vUv=uv;
-  gl_Position=vec4(position.xy,0.0,1.0);
-}
-`;
+    const ii = i & 255;
+    const jj = j & 255;
+    const kk = k & 255;
 
-// Ordered-dither (4x4 Bayer) + radial vignette compositing pass. The dither is
-// the editorial print-grain signature; the vignette darkens the center so the
-// overlaid wordmark stays legible and the motion reads toward the edges.
-const POST_FRAG = /* glsl */ `
-precision highp float;
-uniform sampler2D uScene;
-uniform vec2 uResolution;
-varying vec2 vUv;
+    let n0 = 0, n1 = 0, n2 = 0, n3 = 0;
 
-const mat4 bayer=mat4(
-   0.0,  8.0,  2.0, 10.0,
-  12.0,  4.0, 14.0,  6.0,
-   3.0, 11.0,  1.0,  9.0,
-  15.0,  7.0, 13.0,  5.0
-);
+    let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+    if (t0 >= 0) {
+      const gi0 = permMod12[ii + perm[jj + perm[kk]]] * 3;
+      t0 *= t0;
+      n0 = t0 * t0 * (grad3[gi0] * x0 + grad3[gi0 + 1] * y0 + grad3[gi0 + 2] * z0);
+    }
 
-float bayerValue(vec2 frag){
-  int x=int(mod(frag.x,4.0));
-  int y=int(mod(frag.y,4.0));
-  // Index the constant matrix without dynamic subscripting (GLSL ES1 safe).
-  vec4 row=
-     x==0?bayer[0]
-    :x==1?bayer[1]
-    :x==2?bayer[2]
-    :bayer[3];
-  float v=
-     y==0?row.x
-    :y==1?row.y
-    :y==2?row.z
-    :row.w;
-  return (v+0.5)/16.0;
+    let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+    if (t1 >= 0) {
+      const gi1 = permMod12[ii + i1 + perm[jj + j1 + perm[kk + k1]]] * 3;
+      t1 *= t1;
+      n1 = t1 * t1 * (grad3[gi1] * x1 + grad3[gi1 + 1] * y1 + grad3[gi1 + 2] * z1);
+    }
+
+    let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+    if (t2 >= 0) {
+      const gi2 = permMod12[ii + i2 + perm[jj + j2 + perm[kk + k2]]] * 3;
+      t2 *= t2;
+      n2 = t2 * t2 * (grad3[gi2] * x2 + grad3[gi2 + 1] * y2 + grad3[gi2 + 2] * z2);
+    }
+
+    let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+    if (t3 >= 0) {
+      const gi3 = permMod12[ii + 1 + perm[jj + 1 + perm[kk + 1]]] * 3;
+      t3 *= t3;
+      n3 = t3 * t3 * (grad3[gi3] * x3 + grad3[gi3 + 1] * y3 + grad3[gi3 + 2] * z3);
+    }
+
+    return 32 * (n0 + n1 + n2 + n3);
+  };
 }
 
-void main(){
-  vec3 col=texture2D(uScene,vUv).rgb;
-  float lum=dot(col,vec3(0.299,0.587,0.114));
-
-  // Ordered dither, applied gently so it grains rather than posterizes.
-  float threshold=bayerValue(gl_FragCoord.xy);
-  float levels=18.0;
-  float dithered=floor(lum*levels+(threshold-0.5))/levels;
-  vec3 outCol=col*(dithered/max(lum,1e-4));
-  outCol=mix(col,outCol,0.55);
-
-  // Radial vignette — keep the center calm and dark for the wordmark.
-  vec2 p=vUv-0.5;
-  p.x*=uResolution.x/uResolution.y;
-  float d=length(p);
-  float center=1.0-smoothstep(0.0,0.40,d);     // darken middle for the wordmark
-  float edgeFade=1.0-smoothstep(0.62,1.05,d);    // soft fade toward the frame
-  outCol*=mix(1.0,0.22,center);
-  outCol*=mix(0.30,1.0,edgeFade);
-
-  gl_FragColor=vec4(outCol,1.0);
-}
-`;
-
-// ── Tunables ────────────────────────────────────────────────────────────────
+// ── Tunables ─────────────────────────────────────────────────────────────────
 // The 800ms mount fade lives in CSS (.noise-field transition in globals.css).
-const MAX_DPR = 1.5;
+// prophet's SIZE / segment / noise constants are reproduced verbatim below.
+const SIZE = 48;
 
 export default function NoiseField() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -210,14 +176,24 @@ export default function NoiseField() {
       ).matches;
       const isMobile = window.matchMedia("(max-width: 640px)").matches;
 
+      // ── Scene: prophet's amber wireframe terrain in fog ────────────────────
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.Fog(0x0a0d12, 14, 42);
+
+      const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+      camera.position.set(0, 9, 18);
+      camera.lookAt(0, -1, 0);
+
       const renderer = new THREE.WebGLRenderer({
-        antialias: false,
+        antialias: true,
         alpha: true,
-        powerPreference: "low-power",
+        powerPreference: "high-performance",
       });
-      const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.2 : MAX_DPR);
+      const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
       renderer.setPixelRatio(dpr);
-      renderer.setClearColor(0x0c0c0e, 1);
+      // Transparent clear so the band composites over the dark page; the CSS
+      // top-fade mask + fog melt the terrain upward into the background.
+      renderer.setClearColor(0x000000, 0);
       const canvas = renderer.domElement;
       canvas.style.position = "absolute";
       canvas.style.inset = "0";
@@ -226,77 +202,63 @@ export default function NoiseField() {
       canvas.style.display = "block";
       container.appendChild(canvas);
 
-      // ── Scene: an angled, displaced plane viewed from above ────────────────
-      const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
-      camera.position.set(0, -3.0, 7.4);
-      camera.lookAt(0, 0.6, 0);
+      const segments = isMobile ? 64 : 96;
+      const geometry = new THREE.PlaneGeometry(SIZE, SIZE, segments, segments);
+      geometry.rotateX(-Math.PI / 2);
 
-      const segs = isMobile ? 110 : 200;
-      const geometry = new THREE.PlaneGeometry(20, 12, segs, Math.round(segs * 0.6));
-
-      const meshUniforms = {
-        uTime: { value: 0 },
-        uAmp: { value: 1.55 },
-        uBase: { value: new THREE.Color(0x18181c) },
-        uHi: { value: new THREE.Color(0x55555e) },
-        uAccent: { value: new THREE.Color(0xefc540) },
-      };
-      const meshMaterial = new THREE.ShaderMaterial({
-        uniforms: meshUniforms,
-        vertexShader: MESH_VERT,
-        fragmentShader: MESH_FRAG,
-        wireframe: true,
+      const material = new THREE.LineBasicMaterial({
+        color: 0xf59e0b,
         transparent: true,
+        opacity: 0.55,
       });
-      const mesh = new THREE.Mesh(geometry, meshMaterial);
-      mesh.rotation.x = -Math.PI * 0.46;
-      scene.add(mesh);
+      let wire = new THREE.WireframeGeometry(geometry);
+      const wireMesh = new THREE.LineSegments(wire, material);
+      scene.add(wireMesh);
 
-      // ── Post pass: render scene to a target, then dither+vignette to screen ─
-      const renderTarget = new THREE.WebGLRenderTarget(1, 1, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-      });
-
-      const postScene = new THREE.Scene();
-      const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-      const postUniforms = {
-        uScene: { value: renderTarget.texture },
-        uResolution: { value: new THREE.Vector2(1, 1) },
-      };
-      const postMaterial = new THREE.ShaderMaterial({
-        uniforms: postUniforms,
-        vertexShader: QUAD_VERT,
-        fragmentShader: POST_FRAG,
+      const ghostMaterial = new THREE.MeshBasicMaterial({
+        color: 0x161b22,
         transparent: true,
+        opacity: 0.7,
+        side: THREE.DoubleSide,
       });
-      const postQuad = new THREE.Mesh(
-        new THREE.PlaneGeometry(2, 2),
-        postMaterial,
-      );
-      postScene.add(postQuad);
+      const ghostMesh = new THREE.Mesh(geometry, ghostMaterial);
+      ghostMesh.position.y = -0.05;
+      scene.add(ghostMesh);
+
+      const noise3D = buildNoise3D();
+
+      const positionAttr = geometry.attributes.position as THREE_NS.BufferAttribute;
+      const initialPositions = positionAttr.array.slice() as Float32Array;
+
+      const displace = (t: number) => {
+        const arr = positionAttr.array as Float32Array;
+        for (let i = 0; i < arr.length; i += 3) {
+          const x = initialPositions[i];
+          const z = initialPositions[i + 2];
+          arr[i + 1] =
+            noise3D(x * 0.08, z * 0.08, t * 0.18) * 1.6 +
+            noise3D(x * 0.22, z * 0.22, t * 0.32) * 0.45;
+        }
+        positionAttr.needsUpdate = true;
+
+        wire.dispose();
+        wire = new THREE.WireframeGeometry(geometry);
+        wireMesh.geometry.dispose();
+        wireMesh.geometry = wire;
+
+        const yaw = Math.sin(t * 0.04) * 0.04;
+        ghostMesh.rotation.y = yaw;
+        wireMesh.rotation.y = yaw;
+      };
 
       const resize = () => {
         const w = container.clientWidth || window.innerWidth;
         const h = container.clientHeight || window.innerHeight;
         renderer.setSize(w, h, false);
-        renderTarget.setSize(
-          Math.max(1, Math.round(w * dpr)),
-          Math.max(1, Math.round(h * dpr)),
-        );
-        postUniforms.uResolution.value.set(w * dpr, h * dpr);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
       };
       resize();
-
-      const renderFrame = () => {
-        renderer.setRenderTarget(renderTarget);
-        renderer.render(scene, camera);
-        renderer.setRenderTarget(null);
-        renderer.render(postScene, postCamera);
-      };
 
       const ro = new ResizeObserver(resize);
       ro.observe(container);
@@ -306,17 +268,18 @@ export default function NoiseField() {
         if (!disposed) setFadedIn(true);
       });
 
+      const start = performance.now();
+
       if (reducedMotion) {
         // Single static frame — no animation loop.
-        meshUniforms.uTime.value = 12.0;
-        renderFrame();
+        displace(12);
+        renderer.render(scene, camera);
         cleanup = () => {
           ro.disconnect();
+          wire.dispose();
           geometry.dispose();
-          meshMaterial.dispose();
-          postQuad.geometry.dispose();
-          postMaterial.dispose();
-          renderTarget.dispose();
+          material.dispose();
+          ghostMaterial.dispose();
           renderer.dispose();
           renderer.forceContextLoss();
           if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
@@ -324,11 +287,10 @@ export default function NoiseField() {
         return;
       }
 
-      const start = performance.now();
       const loop = (now: number) => {
         raf = requestAnimationFrame(loop);
-        meshUniforms.uTime.value = (now - start) / 1000;
-        renderFrame();
+        displace((now - start) / 1000);
+        renderer.render(scene, camera);
       };
       raf = requestAnimationFrame(loop);
 
@@ -347,11 +309,10 @@ export default function NoiseField() {
         ro.disconnect();
         if (raf) cancelAnimationFrame(raf);
         raf = 0;
+        wire.dispose();
         geometry.dispose();
-        meshMaterial.dispose();
-        postQuad.geometry.dispose();
-        postMaterial.dispose();
-        renderTarget.dispose();
+        material.dispose();
+        ghostMaterial.dispose();
         renderer.dispose();
         renderer.forceContextLoss();
         if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
