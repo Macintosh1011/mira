@@ -84,7 +84,7 @@ export const NeuralScene: React.FC = () => {
             caret={0.4 + 0.6 * Math.abs(Math.sin(t * 4))}
             micPulse={Math.abs(Math.sin(t * 3.4))}
             armed={clamp((reveal - 0.9) / 0.1)}
-            width={760}
+            width={860}
           />
         </div>
       )}

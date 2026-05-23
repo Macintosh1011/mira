@@ -45,12 +45,12 @@ const PANELS = [
 ] as const;
 
 // The four named beats (seconds local)
-const BEAT_PLAN     = 4.0;
-const BEAT_GENERATE = 4.8;
-const BEAT_NARRATE  = 5.6;
-const BEAT_VERIFY   = 6.4;
-const ALL_GLOW_START = 6.8;
-const GRAPH_START    = 7.6;
+const BEAT_PLAN     = 1.2;
+const BEAT_GENERATE = 2.1;
+const BEAT_NARRATE  = 3.0;
+const BEAT_VERIFY   = 3.9;
+const ALL_GLOW_START = 5.0;
+const GRAPH_START    = 6.2;
 const ACT_END        = 9.1;
 
 // Sequence: which panel activates at which beat (index-parallel with PANELS)

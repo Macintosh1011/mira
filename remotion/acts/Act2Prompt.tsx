@@ -48,7 +48,7 @@ export const Act2Prompt: React.FC = () => {
         </div>
 
         <div style={{ opacity: intro, transform: `translateY(${(1 - intro) * 24}px) scale(${1 + submit * 0.012})` }}>
-          <CommandBar text={QUERY} reveal={reveal} caret={caret} micPulse={mic} armed={armed} width={760} />
+          <CommandBar text={QUERY} reveal={reveal} caret={caret} micPulse={mic} armed={armed} width={860} />
         </div>
 
         <div

@@ -134,8 +134,8 @@ export const Act1Problem: React.FC = () => {
   const f = useCurrentFrame();
   const t = f / FPS;
   // blur + desaturate ramp as the words "blur together" and freeze
-  const blur = interpolate(t, [3.9, 5.8], [0, 20], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const sat = interpolate(t, [3.9, 5.8], [1, 0.25], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const blur = interpolate(t, [4.4, 6.3], [0, 20], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const sat = interpolate(t, [4.4, 6.3], [1, 0.25], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   const scale = 1 + easeOutCubic(clamp(t / 6)) * 0.04;
   return (
     <AbsoluteFill style={{ background: rgb(C.bgDeep) }}>
