@@ -145,6 +145,19 @@ export const epidemic: Sim = {
 
     const recoverySteps = () => Math.max(1, Math.round(params.recoveryTime * FPS));
 
+    // The outbreak's natural length in sim-seconds (a few generations). The sim
+    // is only allowed to advance to the current beat's target, so the curve and
+    // the swarm unfold WITH the narration instead of finishing all at once.
+    const totalSimSeconds = () => Math.max(8, params.recoveryTime * 6.5);
+    const phaseTargetSeconds = (): number => {
+      const last = phaseCount - 1;
+      if (phase >= last || last <= 0) return totalSimSeconds() * 1.4; // burnout
+      // Back-loaded + compressed early so the growth beat reads as early spread
+      // and the peak beat lands near the I-curve maximum (the tail is long).
+      const frac = 0.03 + 0.37 * Math.pow(phase / Math.max(1, last - 1), 1.4);
+      return totalSimSeconds() * frac;
+    };
+
     function layout(W: number, H: number): void {
       const pad = 28;
       const split = Math.round(W * 0.55);
@@ -343,10 +356,23 @@ export const epidemic: Sim = {
     const ode = content.equation
       ? content.equation
       : "\\frac{dS}{dt}=-\\frac{\\beta S I}{N}\\quad\\frac{dI}{dt}=\\frac{\\beta S I}{N}-\\gamma I\\quad\\frac{dR}{dt}=\\gamma I";
-    eqEl.innerHTML =
-      `<span>${tex(ode)}</span>` +
-      `<span>${tex("R_0=\\frac{\\beta}{\\gamma}")}</span>` +
-      `<span>${tex("\\text{herd}=1-\\tfrac{1}{R_0}")}</span>`;
+    // Reveal the math beat-by-beat: nothing at patient zero, the governing law
+    // once spread begins, the herd-immunity identity only at the final beat.
+    const updateEqs = (): void => {
+      if (phase < 1) {
+        eqEl.innerHTML = "";
+        return;
+      }
+      const parts = [
+        `<span>${tex(ode)}</span>`,
+        `<span>${tex("R_0=\\frac{\\beta}{\\gamma}")}</span>`,
+      ];
+      if (phase >= phaseCount - 1) {
+        parts.push(`<span>${tex("\\text{herd}=1-\\tfrac{1}{R_0}")}</span>`);
+      }
+      eqEl.innerHTML = parts.join("");
+    };
+    updateEqs();
 
     // ── p5 sketch ──────────────────────────────────────────────────────────
     const sketch = (p: P5): void => {
@@ -379,7 +405,10 @@ export const epidemic: Sim = {
         acc += dt;
         const stepMs = 1000 / FPS;
         let guard = 0;
-        const stillSpreading = activeInfections() > 0 && hist.length < HIST_CAP;
+        const stillSpreading =
+          activeInfections() > 0 &&
+          hist.length < HIST_CAP &&
+          stepCount / FPS < phaseTargetSeconds(); // hold at the current beat
         while (acc >= stepMs && guard < 6) {
           if (stillSpreading) step();
           acc -= stepMs;
@@ -502,7 +531,7 @@ export const epidemic: Sim = {
         kit.plotLine(p, { ...plot, points: sPts, t: 1, color: C_S, head: false });
         kit.plotLine(p, { ...plot, points: iPts, t: 1, color: C_I, head: true });
 
-        if (peakI > 0.01) {
+        if (phase >= 2 && peakI > 0.01) {
           const px = plot.x + kit.clamp01(peakStep / denom) * plot.w;
           const py = plot.y + plot.h - kit.clamp01(peakI) * plot.h;
           p.push();
@@ -542,18 +571,24 @@ export const epidemic: Sim = {
       const n = agents.length || 1;
       const herd = params.r0 > 1 ? 1 - 1 / params.r0 : 0;
       const protectedNow = params.vaccination >= herd && herd > 0;
+      // Reveal readouts beat-by-beat: live S/I/R + R₀ from the start, the peak
+      // only once we're at the peak beat, the herd threshold only at the end.
       const cards: { label: string; value: string; color: RGB }[] = [
         { label: "S", value: String(c.s), color: C_S },
         { label: "I", value: String(c.i), color: C_I },
         { label: "R", value: String(c.r), color: C_R },
         { label: "R₀", value: params.r0.toFixed(1), color: PAL.accent },
-        { label: "peak I", value: `${(peakI * 100).toFixed(0)}%`, color: C_I },
-        {
+      ];
+      if (phase >= 2) {
+        cards.push({ label: "peak I", value: `${(peakI * 100).toFixed(0)}%`, color: C_I });
+      }
+      if (phase >= phaseCount - 1) {
+        cards.push({
           label: "herd thr",
           value: `${(herd * 100).toFixed(0)}%`,
           color: protectedNow ? C_S : PAL.fgMuted,
-        },
-      ];
+        });
+      }
       const cw = 78;
       const startX = W - 28 - cards.length * cw;
       const y = 60;
@@ -583,7 +618,8 @@ export const epidemic: Sim = {
 
       // Herd-immunity banner: the payoff of the vaccination slider.
       const done = activeInfections() === 0 && stepCount > 0;
-      if (protectedNow) {
+      const finalBeat = phase >= phaseCount - 1;
+      if (finalBeat && protectedNow) {
         kit.label(p, {
           x: field.x,
           y: field.y + field.h + 18,
@@ -596,7 +632,7 @@ export const epidemic: Sim = {
           color: C_S,
           align: "left",
         });
-      } else if (done) {
+      } else if (finalBeat && done) {
         const attack =
           (c.r / n - params.vaccination) / Math.max(1e-6, 1 - params.vaccination);
         kit.label(p, {
@@ -625,6 +661,7 @@ export const epidemic: Sim = {
     return {
       setPhase: (n: number) => {
         phase = Math.max(0, Math.min(phaseCount - 1, Math.floor(n)));
+        updateEqs();
       },
       setParam: (key: string, value: number) => {
         if (!(key in params)) return;
