@@ -85,7 +85,7 @@ export function digitAt(t: number): number[][] {
 export const flatten = (m: number[][]) => m.flat();
 
 // ── authored softmax over 10 classes ───────────────────────────────────────
-const CLEAN = [0.001, 0.007, 0.003, 0.001, 0.0005, 0.0005, 0.0005, 0.982, 0.001, 0.005];
+const CLEAN = [0.001, 0.006, 0.0025, 0.001, 0.0005, 0.0005, 0.0005, 0.982, 0.001, 0.0045];
 const AMBIG = [0.004, 0.43, 0.008, 0.004, 0.003, 0.003, 0.003, 0.54, 0.001, 0.004];
 
 /** Probability vector at morph t, renormalized. Index 7 = "7", index 1 = "1". */
