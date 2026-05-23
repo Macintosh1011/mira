@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { Pause, Play, MessageSquarePlus } from "lucide-react";
 import { useMiraSession } from "@/lib/useMiraSession";
 import CommandPalette, {
@@ -11,6 +12,13 @@ import FedCanvas from "@/components/canvas/FedCanvas";
 import { PhaseIndicator } from "@/components/canvas/CanvasShared";
 import RenderHost from "@/lib/render/RenderHost";
 import { RECENTS } from "@/lib/topics";
+
+// three touches `window`; keep it out of SSR and the main bundle. Falls back to
+// the faint CSS grain while the WebGL backdrop loads.
+const NoiseField = dynamic(() => import("@/components/landing/NoiseField"), {
+  ssr: false,
+  loading: () => <div className="grain" />,
+});
 
 const TOPIC_CANVAS = {
   NNCanvas,
@@ -120,7 +128,7 @@ export default function Page() {
       {/* Empty state — unmounted during playback so it can't overlap canvas */}
       {phase === "empty" && (
         <div className="empty">
-          <div className="grain" />
+          <NoiseField />
           <div
             style={{
               position: "relative",

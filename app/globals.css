@@ -124,6 +124,21 @@ input::placeholder {
 }
 
 /* ─────────────────────────────────────────────────────────── */
+/*  Landing noise field (empty-state WebGL backdrop)           */
+/* ─────────────────────────────────────────────────────────── */
+.noise-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 800ms var(--ease-smooth);
+}
+.noise-field[data-faded="in"] {
+  opacity: 1;
+}
+
+/* ─────────────────────────────────────────────────────────── */
 /*  Empty state                                                */
 /* ─────────────────────────────────────────────────────────── */
 
