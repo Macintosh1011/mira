@@ -1,10 +1,10 @@
 # Mira
 
-> **The visualization layer for thinking.** (idea stage, nothing built yet)
+> **The visualization layer for thinking.** Built at the Google I/O Hackathon, May 2026. Live demo: **https://mira-omega-woad.vercel.app**
 
 Mira is a generative visualization engine. You speak an idea, and it produces a Ciechanowski/3Blue1Brown-style animated, narrated explanation of that concept on demand, in seconds. Parallel Gemini 3.5 Flash sub-agents generate a synchronized in-browser animation plus narration, and your follow-up questions morph the existing scene instead of starting over. Think of it as a creative tool for turning ideas into moving visuals, the same category as a generative-art engine, not an assistant that answers questions for you.
 
-I just had this idea at the Google I/O Hackathon, May 2026. This README is me thinking it through, not documentation for something that runs. The repo is empty. Treat everything below as a target I want to hit, not a feature that exists.
+I sketched this idea at the Google I/O Hackathon, May 2026, and then built it in the room, so this is no longer just notes. It runs end to end: you type or speak a query, a fan-out of Gemini 3.5 Flash agents plans the scene, writes the p5.js or three.js animation, and narrates it, all streamed live into the browser, with a Managed Agents API verifier checking the animation against the narration. Everything below is the original idea-stage thinking, kept as-is, because the open questions I wrote down that morning are mostly the ones I actually had to answer while building.
 
 ---
 
