@@ -42,3 +42,6 @@ next-env.d.ts
 
 # allow the example env to be committed
 !.env.example
+
+# agent debug artifacts
+.playwright-mcp/
