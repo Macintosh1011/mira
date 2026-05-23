@@ -288,6 +288,9 @@ export function useMiraSession(): MiraSession {
     (raw: string) => {
       const query = raw.trim();
       if (!query) return;
+      // Prime audio playback while we're still inside the user gesture so the
+      // prefetched ElevenLabs clips aren't autoplay-blocked at cue time.
+      narratorRef.current?.unlock();
       stopStt();
       const mutate = phase === "morphing" && scene !== null;
 
