@@ -369,6 +369,19 @@ async function classifySim(
 ): Promise<SimId | null> {
   const words = new Set(query.toLowerCase().match(/[a-z]+/g) ?? []);
 
+  // Generative image synthesis (text-to-image) has no matching sim, and the
+  // neural-net classifier is the wrong picture for it. Force the archetype path
+  // so the generation pipeline (prompt -> encoder -> diffusion -> image) renders
+  // as a clean flow instead of a digit classifier.
+  const q = query.toLowerCase();
+  const imageGen =
+    /text[- ]?to[- ]?image|dall[- ]?e|midjourney|stable diffusion|diffusion model/.test(
+      q,
+    ) ||
+    (/\b(image|picture|photo|artwork)\b/.test(q) &&
+      /\b(generat|creat|synthesi|prompt|produce)/.test(q));
+  if (imageGen) return null;
+
   let best: SimSpec | undefined;
   let bestScore = 0;
   let runnerUp = 0;
