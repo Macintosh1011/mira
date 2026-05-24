@@ -488,8 +488,8 @@ const SIM_CONTENT_SPECS: Record<SimId, SimContentSpec> = {
     brief:
       "SIR epidemic spread: a population of agents moves between Susceptible, Infected, and Recovered. Contact spreads infection at rate beta; infected recover at rate gamma. Build from the seed infection -> exponential growth (R0>1) -> the epidemic peak -> burnout / herd immunity.",
     paramHints:
-      "population (agents, ~500), beta (infection rate, ~0.4), gamma (recovery rate, ~0.1), r0 (beta/gamma, ~4)",
-    defaultParams: { population: 500, beta: 0.4, gamma: 0.1, r0: 4 },
+      "r0 (basic reproduction number, 0.5-6, ~4), recoveryTime (seconds infectious, 2-14, ~6), vaccination (fraction immune at start, 0-0.95), population (agents, 120-800, ~500)",
+    defaultParams: { r0: 4, recoveryTime: 6, vaccination: 0, population: 500 },
     equation:
       "\\frac{dI}{dt} = \\beta\\,\\frac{S I}{N} - \\gamma I",
   },
@@ -687,6 +687,13 @@ function normalizeSimContent(
     params: coerceParams(raw.params, spec.defaultParams),
     equation: str(raw.equation) || spec.equation,
   };
+
+  // Demo-critical: a "vaccine" question must VISIBLY change the outcome, so push
+  // vaccination above the herd-immunity threshold (R0=4 -> 0.75); the curve then
+  // flattens instead of replaying the same outbreak as the prior scene.
+  if (simId === "epidemic" && /vaccin/i.test(query)) {
+    content.params = { ...content.params, vaccination: 0.85 };
+  }
 
   return { kind: "sim", simId, content, phases };
 }
