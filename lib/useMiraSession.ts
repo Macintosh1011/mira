@@ -188,6 +188,9 @@ export function useMiraSession(): MiraSession {
     simId?: string;
     content?: SceneContent;
   } | null>(null);
+  // Generation token: bumped on every submit / palette close so a cached
+  // topic's deferred "generation theater" timers no-op if the user moved on.
+  const matchGenRef = useRef(0);
 
   // Lazily construct the Narrator on the client. Each cue activation drives the
   // caption AND the canvas phase in lockstep — onCue(i) means cue i is speaking,
@@ -234,6 +237,7 @@ export function useMiraSession(): MiraSession {
     stopStt();
     handleRef.current?.abort();
     handleRef.current = null;
+    matchGenRef.current += 1; // cancel any pending cached-topic generation theater
     narratorRef.current?.reset();
     setDismissing(true);
     window.setTimeout(() => {
@@ -365,14 +369,38 @@ export function useMiraSession(): MiraSession {
       // prefetched ElevenLabs clips aren't autoplay-blocked at cue time.
       narratorRef.current?.unlock();
       stopStt();
+      handleRef.current?.abort();
+      const gen = (matchGenRef.current += 1);
       const mutate = phase === "morphing" && scene !== null;
 
       const topic = matchTopic(query);
       if (topic) {
+        // Cached hand-authored topic: run the SAME agent-dot generation theater
+        // as a live query (~7-9s) so it's indistinguishable from a real run and
+        // never plays instantly. Token + phase guard cancel it on esc/resubmit.
         renderRevRef.current += 1;
-        // Matched query: instant hand-authored SVG topic, no model round-trip.
-        setAgents(["done", "done", "done", "done"]);
-        startPlaying(topicToScene(topic, renderRevRef.current));
+        const topicScene = topicToScene(topic, renderRevRef.current);
+        setAgents(["active", "idle", "idle", "idle"]);
+        setPhase(mutate ? "morphing" : "generating");
+        setPaletteVisible(true);
+        setDismissing(false);
+        const total = 6800 + Math.random() * 2400;
+        const live = () => gen === matchGenRef.current;
+        window.setTimeout(() => {
+          if (live()) setAgents(["done", "active", "active", "idle"]);
+        }, total * 0.32);
+        window.setTimeout(() => {
+          if (live()) setAgents(["done", "done", "done", "active"]);
+        }, total * 0.74);
+        window.setTimeout(() => {
+          if (
+            live() &&
+            (phaseRef.current === "generating" || phaseRef.current === "morphing")
+          ) {
+            setAgents(["done", "done", "done", "done"]);
+            startPlaying(topicScene);
+          }
+        }, total);
         return;
       }
       // Novel query: live Gemini generation.
@@ -461,6 +489,7 @@ export function useMiraSession(): MiraSession {
     }
     handleRef.current?.abort();
     handleRef.current = null;
+    matchGenRef.current += 1; // cancel any pending cached-topic generation theater
     stopStt();
     setDismissing(true);
     window.setTimeout(() => {

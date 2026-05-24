@@ -124,7 +124,10 @@ export const epidemic: Sim = {
     const ov = content.params ?? {};
     for (const c of CONTROLS) {
       const v = ov[c.key];
-      params[c.key as keyof Params] = typeof v === "number" ? v : c.default;
+      params[c.key as keyof Params] =
+        typeof v === "number" && Number.isFinite(v)
+          ? Math.max(c.min, Math.min(c.max, v))
+          : c.default;
     }
 
     // ── phase / clock state ───────────────────────────────────────────────
@@ -182,7 +185,9 @@ export const epidemic: Sim = {
       peakI = 0;
       peakStep = 0;
       stepCount = 0;
-      const n = Math.round(params.population);
+      // Hard cap regardless of the generated param so the main thread can never
+      // be locked by a runaway agent count.
+      const n = Math.max(60, Math.min(500, Math.round(params.population) || 400));
       const vaxCount = Math.round(n * params.vaccination);
       agents = new Array(n);
       const speed = 1.05;
@@ -664,8 +669,11 @@ export const epidemic: Sim = {
         updateEqs();
       },
       setParam: (key: string, value: number) => {
-        if (!(key in params)) return;
-        params[key as keyof Params] = value;
+        if (!(key in params) || !Number.isFinite(value)) return;
+        const ctl = CONTROLS.find((c) => c.key === key);
+        params[key as keyof Params] = ctl
+          ? Math.max(ctl.min, Math.min(ctl.max, value))
+          : value;
         // Any knob change restarts the deterministic outbreak from patient zero
         // so the user sees the full new wave (flattened / sharpened) at once.
         spawn();
