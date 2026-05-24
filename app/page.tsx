@@ -12,7 +12,6 @@ import FedCanvas from "@/components/canvas/FedCanvas";
 import { PhaseIndicator } from "@/components/canvas/CanvasShared";
 import RenderHost from "@/lib/render/RenderHost";
 import SimHost from "@/lib/render/SimHost";
-import SceneControls from "@/components/SceneControls";
 import PromptTeaser from "@/components/landing/PromptTeaser";
 import { getSim } from "@/lib/sims";
 import { loadRenderLibs } from "@/lib/render/libs";
@@ -343,22 +342,6 @@ export default function Page() {
         <span className="kbd">esc</span>
         <span className="eh-text">to start over</span>
       </div>
-
-      {/* Interactive-sim slider panel — kept available through the rest state */}
-      {(phase === "playing" || phase === "paused" || phase === "ended") &&
-        scene?.kind === "live" &&
-        scene.simId &&
-        simControls.length > 0 && (
-          <SceneControls
-            controls={simControls}
-            values={simParams}
-            equationHtml={equationHtml}
-            visible={controlsVisible}
-            onChange={(key, value) =>
-              setSimParams((prev) => ({ ...prev, [key]: value }))
-            }
-          />
-        )}
 
       {/* Backdrop (dim click-to-close; hidden during morphing so canvas shows) */}
       <div
